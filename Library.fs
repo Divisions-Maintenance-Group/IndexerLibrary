@@ -1,9 +1,5 @@
 ﻿namespace IndexerLibrary
 
-module Say =
-    let hello name =
-        printfn "Hello %s" name
-
 open System
 open System.Net
 open System.Collections.Generic
@@ -12,8 +8,7 @@ open RocksDbSharp
 open MBrace.FsPickler
 open FSharpPlus
 open System.Text.RegularExpressions
-open Dmg.Topics
-open Dmg
+open Indexer.Topics
 
 type RepeatedField<'a> = Google.Protobuf.Collections.RepeatedField<'a>
 type MapField<'TKey,'TValue> = Google.Protobuf.Collections.MapField<'TKey,'TValue>
@@ -106,7 +101,7 @@ module Dataset =
       abstract RangeUsingSnapshot: IKeyable<'Key> -> IKeyable<'Key> -> Option<IKeyable<'Key> -> IKeyable<'Key> -> int> -> Snapshot -> seq<Upsert<IKeyable<'Key>, 'T>>
       abstract GetAll: unit -> list<Upsert<IKeyable<'Key>, 'T>>
 
-   let cache = PicklerCache.FromCustomPicklerRegistry (Dmg.Protobuf.FSharp.Pickler.createRegistry ())
+   let cache = PicklerCache.FromCustomPicklerRegistry (IndexerLibrary.Protobuf.FSharp.Pickler.createRegistry ())
    let bs = FsPickler.CreateBinarySerializer(picklerResolver = cache)
 
 
@@ -117,7 +112,7 @@ module Dataset =
          member this.GetKeyBytes() = this.Key.GetBytes
          member this.Compare (other: IKeyable<UUID>) = compare this.Key (other.GetKey())
          member this.LowestPossibleKeyInRange() = 
-            {UUIDKey.Key = Dmg.UUID.TryParse("00000000-0000-0000-0000-000000000000").Value}
+            {UUIDKey.Key = UUID.TryParse("00000000-0000-0000-0000-000000000000").Value}
 
    type DateKey =
       {Key: DateTime}

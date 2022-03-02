@@ -1,12 +1,12 @@
-namespace Dmg.Topics
+namespace Indexer.Topics
+
 open System
 open System.Collections.Generic
 open System.Collections.Concurrent
 open System.Collections.Immutable
 open System.Threading
 open System.Threading.Tasks
-open Dmg
-
+open IndexerLibrary
 
 type internal KOffset = Confluent.Kafka.Offset
 type internal KPartition = Confluent.Kafka.Partition

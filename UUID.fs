@@ -1,4 +1,4 @@
-namespace Dmg
+namespace IndexerLibrary
 
 open System
 open System.Text.RegularExpressions

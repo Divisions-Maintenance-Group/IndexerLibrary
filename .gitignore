@@ -274,10 +274,5 @@ coverage.*.xml
 # MacOS
 .DS_Store
 
-
-src/Dmg.StateServer/test_consume_rocksdb
-src/Dmg.StateServer/rocksdb
-src/Dmg.ProviderMaster2/rocksdb
-
 proto
 .vscode

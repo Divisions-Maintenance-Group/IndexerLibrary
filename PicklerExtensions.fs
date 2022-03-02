@@ -1,4 +1,4 @@
-namespace Dmg.Protobuf.FSharp
+namespace IndexerLibrary.Protobuf.FSharp
 
 open System
 open System.Collections.Generic
