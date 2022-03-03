@@ -13,7 +13,7 @@ open Indexer.Topics
 type RepeatedField<'a> = Google.Protobuf.Collections.RepeatedField<'a>
 type MapField<'TKey,'TValue> = Google.Protobuf.Collections.MapField<'TKey,'TValue>
 
-module Dataset = 
+module Indexer = 
    type Upsert<'Key, 'Value> = {
       Key: 'Key
       Value: Option<'Value>
