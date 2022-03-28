@@ -36,7 +36,7 @@ type ProtobufConverter(proxyTypesAssembly: Assembly) =
         let csMsgType = this.FindMatchingProtobufType<'T> ()
         let csMsg = Activator.CreateInstance(csMsgType) :?> IMessage
         csMsg.MergeFrom(inMessageStream)
-        let jsFormatter = new JsonFormatter(JsonFormatter.Settings.Default)
+        let jsFormatter = new JsonFormatter(JsonFormatter.Settings.Default.WithFormatDefaultValues(true))
         jsFormatter.Format(csMsg, jsonWriter)
 
     member this.JsonToBinary<'T when 'T :> IMessage<'T>> (jsonReader: TextReader, outMessageStream: Stream) =
