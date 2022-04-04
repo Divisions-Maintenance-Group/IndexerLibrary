@@ -392,6 +392,8 @@ module Indexer =
                let mutable x = 0
                while true do
                      let! result = topic.Read ()
+                     while transactionProcessor.CurrentQueueLength > 1000 do
+                        do! Async.Sleep(100)
                      transactionProcessor.Post (Action (fun () -> 
                         observable.Next [{Key = {UUIDKey.Key = result.key}; Value = result.value}]
                         db.Write(wb)
