@@ -188,7 +188,7 @@ module TopicDefinition =
 
 type ITopicServerConnection =
     abstract member BootstrapServers : string with get, set
-    abstract member OpenReaderAsync : topicDef:TopicDefinition<'Key, 'Value> * ?startOffset: (TopicName * Partition * Offset) -> Async<ITopicReader<'Key, 'Value>>
+    abstract member OpenReaderAsync : topicDef:TopicDefinition<'Key, 'Value> * partition:int * ?startOffset: (TopicName * Partition * Offset) -> Async<ITopicReader<'Key, 'Value>>
     abstract member OpenWriterAsync : topicDef:TopicDefinition<'Key, 'Value> * ?missingTopicBehavior:MissingTopicBehavior -> Async<ITopicWriter<'Key, 'Value>>
 
 type internal TopicData<'Key, 'Value>(serializeKey: (KISerializer<'Key> * KIDeserializer<'Key>), serializeValue: (KISerializer<'Value> * KIDeserializer<'Value>)) =
@@ -320,7 +320,7 @@ type InMemoryTopicServerConnection(bootstrapServers) =
 
     interface ITopicServerConnection with
         override val BootstrapServers = bootstrapServers with get, set
-        override this.OpenReaderAsync<'Key, 'Value> (topicDef, ?startPosition) = this.OpenReaderAsync<'Key, 'Value> (topicDef, ?startPosition = startPosition)
+        override this.OpenReaderAsync<'Key, 'Value> (topicDef, partition: int, ?startPosition) = this.OpenReaderAsync<'Key, 'Value> (topicDef, ?startPosition = startPosition)
         override this.OpenWriterAsync<'Key, 'Value> (topicDef, _) = this.OpenWriterAsync<'Key, 'Value> topicDef
 
 [<AutoOpen>]
@@ -330,7 +330,7 @@ module Extensions2 =
     type ITopicReader<'K,'V> with
         member this.AsyncRead () = this.Read ()
     type ITopicServerConnection with
-        member this.AsyncOpenReader<'K,'V> (topicDef: TopicDefinition<'K,'V>, ?startOffset) = this.OpenReaderAsync (topicDef, ?startOffset = startOffset)
+        member this.AsyncOpenReader<'K,'V> (topicDef: TopicDefinition<'K,'V>, partition: int, ?startOffset) = this.OpenReaderAsync (topicDef, partition, ?startOffset = startOffset)
         member this.AsyncOpenWriter<'K,'V> (topicDef: TopicDefinition<'K,'V>, ?missingTopicBehavior) = this.OpenWriterAsync (topicDef, ?missingTopicBehavior = missingTopicBehavior)
 
 type IKafkaHelpers =
@@ -432,9 +432,9 @@ type KafkaTopicReader<'Key,'Value>(topicName: string, consumer: KIConsumer<'Key,
         valueDeserializer |> Option.iter (cb.SetValueDeserializer >> ignore)        
         new KafkaTopicReader<_,_>(topicName, cb.Build())
 
-    static member OpenAsync(topicSpec, config: KConsumerConfig, ?keyDeserializer, ?valueDeserializer, ?startPosition) = async {      
+    static member OpenAsync(topicSpec, config: KConsumerConfig, partition: int, ?keyDeserializer, ?valueDeserializer, ?startPosition) = async {      
         let reader = new KafkaTopicReader<'Key,'Value>(topicSpec.name, config, ?keyDeserializer = keyDeserializer, ?valueDeserializer = valueDeserializer)
-        reader.Start (defaultArg startPosition (topicSpec.name, Partition 0, Beginning))
+        reader.Start (defaultArg startPosition (topicSpec.name, Partition partition, Beginning))
         return reader
     }
 
@@ -493,7 +493,7 @@ type KafkaTopicReader<'Key,'Value>(topicName: string, consumer: KIConsumer<'Key,
                 disposed <- true
 
 type KafkaServerConnection(bootstrapServers: string) =
-    member _.OpenReaderAsync<'K,'V> (topicDef: TopicDefinition<'K,'V>, ?startPosition) = async {
+    member _.OpenReaderAsync<'K,'V> (topicDef: TopicDefinition<'K,'V>, partition: int, ?startPosition) = async {
         let c = KConsumerConfig(
             GroupId = UUID.New().ToString(),
             EnableAutoCommit = true,
@@ -508,6 +508,7 @@ type KafkaServerConnection(bootstrapServers: string) =
         let! result = KafkaTopicReader.OpenAsync(
             topicDef,
             c,
+            partition,
             keyDeserializer = (topicDef.keySerializer |> snd),
             valueDeserializer = (topicDef.valueSerializer |> snd),
             ?startPosition = startPosition
@@ -527,5 +528,5 @@ type KafkaServerConnection(bootstrapServers: string) =
     
     interface ITopicServerConnection with
         override val BootstrapServers = bootstrapServers with get, set
-        override this.OpenReaderAsync<'K,'V> (topicDef, ?startPosition) = this.OpenReaderAsync<'K,'V> (topicDef, ?startPosition = startPosition)
+        override this.OpenReaderAsync<'K,'V> (topicDef, partition: int, ?startPosition) = this.OpenReaderAsync<'K,'V> (topicDef, partition, ?startPosition = startPosition)
         override this.OpenWriterAsync<'K,'V> (topicDef, ?missingTopicBehavior) = this.OpenWriterAsync<'K,'V> (topicDef, ?missingTopicBehavior = missingTopicBehavior)

@@ -370,6 +370,12 @@ module Indexer =
            let s = Subject<Upsert<IKeyable<'Key>, 'Value> seq>()
            s
    
+   let getNumberOfPartitions (topicName: string) (hostAndPort: string) : int = 
+      Confluent.Kafka.AdminClientBuilder( Confluent.Kafka.AdminClientConfig( BootstrapServers = hostAndPort )).Build()
+         .GetMetadata(TimeSpan.FromSeconds(20))
+         .Topics.SingleOrDefault(fun i -> i.Topic = topicName)
+         .Partitions.Count
+   
 
    // hostAndPort should look something like kafka:9093 or localhost:9092 or something like that
    let sourceNode 
@@ -380,51 +386,56 @@ module Indexer =
       (hostAndPort: string) 
       (transactionProcessor: MailboxProcessor<TransactionMessage>)
       : IObservable<seq<Upsert<IKeyable<UUID>, 'Value>>> = 
+
+         let numPartitions = getNumberOfPartitions (topicName) (hostAndPort)
+         let partitionNumbers = seq { 0 .. (numPartitions-1) }
+
          let index = (new RocksIndex<string, int64>(db, wb, rocksDbName) :> IIndex<string, int64>) 
-         let configedPosition = index.Get {StringKey.Key = "storedPosition"}
          let observable = Subject<Upsert<IKeyable<UUID>, 'Value> seq>()
-         async {
-            try
-               let kafkaServerConnection = new KafkaServerConnection(hostAndPort)
-               let stateTopic = TopicDefinition.CreateOptional<'Value> (topicName, StateTopic) 
-               let topicNamePartitionOffset = Option.map (fun i -> (topicName, Partition 0, Offset (i + 1L))) configedPosition
-               let! topic = kafkaServerConnection.OpenReaderAsync(stateTopic, ?startPosition = topicNamePartitionOffset)
-               let mutable x = 0
-               while true do
-                     let! result = topic.Read ()
-                     while transactionProcessor.CurrentQueueLength > 1000 do
-                        do! Async.Sleep(100)
-                     transactionProcessor.Post (Action (fun () -> 
-                        observable.Next [{Key = {UUIDKey.Key = result.key}; Value = result.value}]
-                        db.Write(wb)
-                        wb.Clear() |> ignore
-                        match result.position with
-                        | (_, _, Offset offset) -> index.Put {StringKey.Key = "storedPosition"} (Some offset)
-                        | _ -> printfn "The offset has been set to an invalid value (probaly a sentinal)"
-                        if x % 100 = 0 then 
-                           printfn "stored: %A %A %A %A %A %A %A %A" x writeCounter getCounter rangeCounter writeBatchCounter reduceCounter testCounter result.key
-                           printfn "stopwatches: global: %A merge: %A rocks: %A reduce: %A primary: %A secondary: %A rgkey: %A rrange: %A rfold: %A rwb: %A rramindex: %A testStopwatch: %A" 
-                              globalStopwatch.ElapsedMilliseconds 
-                              mergeStopwatch.ElapsedMilliseconds 
-                              rocksStopwatch.ElapsedMilliseconds 
-                              reduceStopwatch.ElapsedMilliseconds 
-                              primaryStopwatch.ElapsedMilliseconds 
-                              secondaryStopwatch.ElapsedMilliseconds
-                              reduceGroupKeyStopwatch.ElapsedMilliseconds
-                              reduceRangeStopwatch.ElapsedMilliseconds
-                              reduceFoldStopwatch.ElapsedMilliseconds
-                              reduceWriteBatchStopwatch.ElapsedMilliseconds
-                              reduceRamindexStopwatch.ElapsedMilliseconds
-                              testStopwatch.ElapsedMilliseconds
 
+         partitionNumbers |> Seq.iter (fun partitionNumber -> 
+            async {
+               let configedPosition = index.Get {StringKey.Key = $"storedPosition-{partitionNumber}"}
+               try
+                  let kafkaServerConnection = new KafkaServerConnection(hostAndPort)
+                  let stateTopic = TopicDefinition.CreateOptional<'Value> (topicName, StateTopic) 
+                  let topicNamePartitionOffset = Option.map (fun i -> (topicName, Partition partitionNumber, Offset (i + 1L))) configedPosition
+                  let! topic = kafkaServerConnection.OpenReaderAsync(stateTopic, partitionNumber, ?startPosition = topicNamePartitionOffset)
 
-
-                        x <- x + 1
-                     ))
-            with e ->
-               printfn "%A" e
-               raise e
-         } |> Async.Start
+                  let mutable x = 0
+                  while true do
+                        let! result = topic.Read ()
+                        while transactionProcessor.CurrentQueueLength > 1000 do
+                           do! Async.Sleep(100)
+                        transactionProcessor.Post (Action (fun () -> 
+                           observable.Next [{Key = {UUIDKey.Key = result.key}; Value = result.value}]
+                           db.Write(wb)
+                           wb.Clear() |> ignore
+                           match result.position with
+                           | (_, _, Offset offset) -> index.Put {StringKey.Key = "storedPosition"} (Some offset)
+                           | _ -> printfn "The offset has been set to an invalid value (probaly a sentinal)"
+                           if x % 100 = 0 then 
+                              printfn "partitionNumber = %A, stored: %A %A %A %A %A %A %A %A" partitionNumber x writeCounter getCounter rangeCounter writeBatchCounter reduceCounter testCounter result.key
+                              printfn "stopwatches: global: %A merge: %A rocks: %A reduce: %A primary: %A secondary: %A rgkey: %A rrange: %A rfold: %A rwb: %A rramindex: %A testStopwatch: %A" 
+                                 globalStopwatch.ElapsedMilliseconds 
+                                 mergeStopwatch.ElapsedMilliseconds 
+                                 rocksStopwatch.ElapsedMilliseconds 
+                                 reduceStopwatch.ElapsedMilliseconds 
+                                 primaryStopwatch.ElapsedMilliseconds 
+                                 secondaryStopwatch.ElapsedMilliseconds
+                                 reduceGroupKeyStopwatch.ElapsedMilliseconds
+                                 reduceRangeStopwatch.ElapsedMilliseconds
+                                 reduceFoldStopwatch.ElapsedMilliseconds
+                                 reduceWriteBatchStopwatch.ElapsedMilliseconds
+                                 reduceRamindexStopwatch.ElapsedMilliseconds
+                                 testStopwatch.ElapsedMilliseconds
+                           x <- x + 1
+                        ))
+               with e ->
+                  printfn "%A" e
+                  raise e
+            } |> Async.Start
+         )
          observable
 
    module HelperFunctions = 
