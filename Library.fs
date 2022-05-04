@@ -371,10 +371,18 @@ module Indexer =
            s
    
    let getNumberOfPartitions (topicName: string) (hostAndPort: string) : int = 
-      Confluent.Kafka.AdminClientBuilder( Confluent.Kafka.AdminClientConfig( BootstrapServers = hostAndPort )).Build()
-         .GetMetadata(TimeSpan.FromSeconds(20))
-         .Topics.SingleOrDefault(fun i -> i.Topic = topicName)
-         .Partitions.Count
+      let r = Regex(":9092$")
+      let isPlainText = r.Match(hostAndPort).Success
+      if isPlainText then
+         Confluent.Kafka.AdminClientBuilder( Confluent.Kafka.AdminClientConfig( BootstrapServers = hostAndPort )).Build()
+            .GetMetadata(TimeSpan.FromSeconds(20))
+            .Topics.SingleOrDefault(fun i -> i.Topic = topicName)
+            .Partitions.Count
+      else
+         Confluent.Kafka.AdminClientBuilder( Confluent.Kafka.AdminClientConfig( BootstrapServers = hostAndPort, SecurityProtocol = Confluent.Kafka.SecurityProtocol.Ssl)).Build()
+            .GetMetadata(TimeSpan.FromSeconds(20))
+            .Topics.SingleOrDefault(fun i -> i.Topic = topicName)
+            .Partitions.Count
    
 
    // hostAndPort should look something like kafka:9093 or localhost:9092 or something like that

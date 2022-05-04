@@ -353,11 +353,21 @@ module KafkaHelpers =
         // the whole list every time we want to check whether or not one particular topic exists
         let topicSpec = TopicDefinition.toTopicSpecification nAvailableBrokers topicDef
         let! ctk = Async.CancellationToken
-        let client =
-            Confluent
-                .Kafka
-                .AdminClientBuilder(Confluent.Kafka.AdminClientConfig(BootstrapServers = bootstrapServers))
-                .Build()
+
+        let r = System.Text.RegularExpressions.Regex(":9092$")
+        let isPlainText = r.Match(bootstrapServers).Success
+        let client = 
+            if isPlainText then
+                Confluent
+                    .Kafka
+                    .AdminClientBuilder(Confluent.Kafka.AdminClientConfig(BootstrapServers = bootstrapServers))
+                    .Build()
+            else
+                Confluent
+                    .Kafka
+                    .AdminClientBuilder(Confluent.Kafka.AdminClientConfig(BootstrapServers = bootstrapServers, SecurityProtocol = Confluent.Kafka.SecurityProtocol.Ssl))
+                    .Build()
+
         let metadata =
             client.GetMetadata(TimeSpan.FromSeconds(10))
         let topicExists =
@@ -494,17 +504,32 @@ type KafkaTopicReader<'Key,'Value>(topicName: string, consumer: KIConsumer<'Key,
 
 type KafkaServerConnection(bootstrapServers: string) =
     member _.OpenReaderAsync<'K,'V> (topicDef: TopicDefinition<'K,'V>, partition: int, ?startPosition) = async {
-        let c = KConsumerConfig(
-            GroupId = UUID.New().ToString(),
-            EnableAutoCommit = true,
-            AutoOffsetReset = Confluent.Kafka.AutoOffsetReset.Error,
-            ApiVersionRequest = true,
-            BootstrapServers = bootstrapServers,
-            //AutoCommitIntervalMs = 0,
-            EnableAutoOffsetStore = false,
-            EnablePartitionEof = false,
-            TopicMetadataRefreshIntervalMs = 120000
-        )
+        let r = System.Text.RegularExpressions.Regex(":9092$")
+        let isPlainText = r.Match(bootstrapServers).Success
+        let c = 
+            if isPlainText then
+                KConsumerConfig(
+                    GroupId = UUID.New().ToString(),
+                    EnableAutoCommit = true,
+                    AutoOffsetReset = Confluent.Kafka.AutoOffsetReset.Error,
+                    ApiVersionRequest = true,
+                    BootstrapServers = bootstrapServers,
+                    //AutoCommitIntervalMs = 0,
+                    EnableAutoOffsetStore = false,
+                    EnablePartitionEof = false,
+                    TopicMetadataRefreshIntervalMs = 120000)
+            else
+                KConsumerConfig(
+                    GroupId = UUID.New().ToString(),
+                    EnableAutoCommit = true,
+                    AutoOffsetReset = Confluent.Kafka.AutoOffsetReset.Error,
+                    ApiVersionRequest = true,
+                    BootstrapServers = bootstrapServers,
+                    //AutoCommitIntervalMs = 0,
+                    EnableAutoOffsetStore = false,
+                    EnablePartitionEof = false,
+                    SecurityProtocol = Confluent.Kafka.SecurityProtocol.Ssl,
+                    TopicMetadataRefreshIntervalMs = 120000)
         let! result = KafkaTopicReader.OpenAsync(
             topicDef,
             c,
