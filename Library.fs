@@ -412,7 +412,7 @@ module Indexer =
                            db.Write(wb)
                            wb.Clear() |> ignore
                            match result.position with
-                           | (_, _, Offset offset) -> index.Put {StringKey.Key = "storedPosition"} (Some offset)
+                           | (_, _, Offset offset) -> index.Put {StringKey.Key = $"storedPosition-{partitionNumber}"} (Some offset)
                            | _ -> printfn "The offset has been set to an invalid value (probaly a sentinal)"
                            if x % 100 = 0 then 
                               printfn "partitionNumber = %A, stored: %A %A %A %A %A %A %A %A" partitionNumber x writeCounter getCounter rangeCounter writeBatchCounter reduceCounter testCounter result.key
