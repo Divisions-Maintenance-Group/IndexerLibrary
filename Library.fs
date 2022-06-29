@@ -899,13 +899,14 @@ module Indexer =
       (outputTopicName)
       (messageParser: Google.Protobuf.MessageParser<'Envelope> when 'Envelope :> Google.Protobuf.IMessage) /// something like Dmg.Providers.V1.ProviderOrg.Parser
       (index: IIndex<UUID, 'Value option * ('Value * SourceNodePosition) option>)
+      (positionDict: IIndex<string, int64 * int64>)
       (createEnvelope: SourceNodePosition -> 'Value option -> 'Envelope option when 'Envelope :> Google.Protobuf.IMessage and 'Value :> Google.Protobuf.IMessage)
       (pullPositionAndValueFromEnvelope: 'Envelope -> SourceNodePosition * 'Value when 'Envelope :> Google.Protobuf.IMessage and 'Value :> Google.Protobuf.IMessage)
       (source: IObservable<Delta<IKeyable<UUID>, 'Value> seq * SourceNodePosition> when 'Value :> Google.Protobuf.IMessage)
       : unit = 
       let outputTopic = Kafka.Kafka($"{kafkaBootstrapServers}", outputTopicName)
       let mutable okToProcess = false
-      let positionDict = Dictionary<string * int, int64 * int64>()
+////      ////let positionDict = Dictionary<string * int, int64 * int64>()
 
       async {
          outputTopic.readWholeStream
@@ -915,7 +916,8 @@ module Indexer =
                      index.Put {UUIDKey.Key = uuid} (Some (None, None)) 
                   else
                      let (id, partition, position), value = messageParser.ParseFrom(data) |> pullPositionAndValueFromEnvelope
-                     positionDict.[(id, partition)] <- (position, 0L)
+                     positionDict.Put {StringKey.Key = $"#{id}: #{partition}"} (Some(position, 0L))
+////                     positionDict.[(id, partition)] <- (position, 0L)
                      index.Put {UUIDKey.Key = uuid} (Some (Some value, None))
             )
          okToProcess <- true
@@ -937,14 +939,15 @@ module Indexer =
                      | Some(x) -> Some(fst x, delta.NextValue |> Option.map (fun i -> (i, position)))
                   )
                let id, partition, position = position
-               let found, (lpos, rpos) = positionDict.TryGetValue((id, partition))
-               if found then
-                  positionDict.[(id, partition)] <- (lpos, position)
-               else
-                  positionDict.[(id, partition)] <- (0L, position)
+               let f = positionDict.Get {StringKey.Key = $"#{id}: #{partition}"}
+               match f with
+               | None ->
+                  positionDict.Put {StringKey.Key = $"#{id}: #{partition}"} (Some(0L, position))
+               | Some((lpos, rpos)) -> 
+                  positionDict.Put {StringKey.Key = $"#{id}: #{partition}"} (Some(lpos, position))
             )
 
-            if positionDict.All(fun kvp -> fst kvp.Value <= snd kvp.Value) then
+            if positionDict.GetAllAsSequence() |> Seq.forall(fun kvp -> fst kvp.Value.Value <= snd kvp.Value.Value) then
                index.GetAllAsSequence()
                |> Seq.iter (fun i -> 
                   let (lvalue, rvalueWPosition) = i.Value.Value
