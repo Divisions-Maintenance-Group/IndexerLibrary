@@ -469,7 +469,6 @@ type KafkaTopicReader<'Key,'Value>(topicName: string, consumer: KIConsumer<'Key,
                         let t = channel.Writer.WriteAsync (result', cts.Token)
                         do! Async.AwaitTask (t.AsTask())
                 with e ->
-                    printfn "topicnameyoda = %A" topicName
                     printfn "%A" e
         with e ->
             printfn "%A" e

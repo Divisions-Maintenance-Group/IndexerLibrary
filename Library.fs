@@ -435,41 +435,18 @@ module Indexer =
    type TransactionMessage = 
       | Action of a: (unit -> unit)
       | GetSnapshot of AsyncReplyChannel<Snapshot>
-      | RegisterSourceNode of a: string
-      | MarkEndOfRegistration
-      | MarkEndOfRebuildForOneSourceNode of a: string
    let createTransactionProcessor (db: RocksDb) = 
-      let mutable areAllRebuildsComplete = false
-      let mailboxProcessor = 
-         MailboxProcessor.Start(fun inbox ->
-            let token = ts.Token
-            let rec loop registrations registrationsComplete = async {
+      MailboxProcessor.Start(fun inbox ->
+         let token = ts.Token
+         async {     
+            while not ts.IsCancellationRequested do
                let! msg = inbox.Receive()
-               let state = 
-                  if not ts.IsCancellationRequested then
-                     match msg with
-                     | Action a -> 
-                        a ()
-                        (registrations, registrationsComplete)
-                     | GetSnapshot(reply) -> 
-                        reply.Reply(db.CreateSnapshot())
-                        (registrations, registrationsComplete)
-                     | RegisterSourceNode(sourceNodeUniqueIdentifier) -> 
-                        (registrations |> Map.add sourceNodeUniqueIdentifier false, registrationsComplete)
-                     | MarkEndOfRegistration -> 
-                        (registrations, true)
-                     | MarkEndOfRebuildForOneSourceNode(sourceNodeUniqueIdentifier) -> 
-                        (registrations |> Map.add sourceNodeUniqueIdentifier true, registrationsComplete)
-                  else
-                     registrations, registrationsComplete
-               areAllRebuildsComplete <- snd state && fst state |> Map.forall (fun _ value -> value) 
-               if not ts.IsCancellationRequested then return! loop (fst state) (snd state)
-            }
-            let registrations = Map.empty
-            let registrationsComplete = false
-            loop registrations registrationsComplete
-         )
-      (mailboxProcessor, fun () -> areAllRebuildsComplete)
+               if not ts.IsCancellationRequested then
+                  match msg with
+                  | Action a -> a ()
+                  | GetSnapshot(reply) -> reply.Reply(db.CreateSnapshot())
+         }
+      )
    
    let getSnapshot (transactionProcessor: MailboxProcessor<TransactionMessage> * (unit -> bool)) = 
       (fst transactionProcessor).PostAndReply(fun rc -> GetSnapshot rc)
@@ -494,94 +471,6 @@ module Indexer =
    
    type SourceNodePosition = string * int * int64
 
-
-   // hostAndPort should look something like kafka:9093 or localhost:9092 or something like that
-   let sourceNodeForTransform 
-      (wb: WriteBatch)
-      (db: RocksDb) 
-      (rocksDbName) 
-      (readTopicName: string) 
-      (writeTopicName: string) 
-      (hostAndPort: string) 
-      (transactionProcessor: MailboxProcessor<TransactionMessage> * (unit -> bool))
-      : IObservable<seq<Upsert<IKeyable<UUID>, 'Value>> * SourceNodePosition> = 
-
-         let numPartitions = getNumberOfPartitions (readTopicName) (hostAndPort)
-         let partitionNumbers = seq { 0 .. (numPartitions-1) }
-
-         let index = (new RocksIndex<string, int64>(db, wb, rocksDbName) :> IIndex<string, int64>) 
-         let observable = Subject<Upsert<IKeyable<UUID>, 'Value> seq * SourceNodePosition>()
-
-         //// TODO: need to put a rebuild phase in here
-         let configedPositions = 
-            partitionNumbers |> Seq.map (fun partitionNumber -> 
-               let configedPosition = index.Get {StringKey.Key = $"storedPosition-{partitionNumber}"}
-               (partitionNumber, configedPosition |> Option.defaultValue 0))
-         
-
-         
-
-         
-         
-         
-
-
-         /// This is the old read logic
-         partitionNumbers |> Seq.iter (fun partitionNumber -> 
-            async {
-               let configedPosition = index.Get {StringKey.Key = $"storedPosition-{partitionNumber}"}
-               try
-                  printfn "topic: %A --- 1" readTopicName
-                  let kafkaServerConnection = new KafkaServerConnection(hostAndPort)
-                  let stateTopic = TopicDefinition.CreateOptional<'Value> (readTopicName, StateTopic) 
-                  let topicNamePartitionOffset = Option.map (fun i -> (readTopicName, Partition partitionNumber, Offset (i + 1L))) configedPosition
-                  let! topic = kafkaServerConnection.OpenReaderAsync(stateTopic, partitionNumber, ?startPosition = topicNamePartitionOffset)
-                  printfn "topic: %A --- 2" readTopicName
-
-
-                  let mutable x = 0
-                  while true do
-                        let! result = topic.Read ()
-                        let position = 
-                           match result.position with
-                           | (_, _, Offset(x)) -> x
-                           | _ -> 0L
-
-                        while (fst transactionProcessor).CurrentQueueLength > 1000 do
-                           do! Async.Sleep(100)
-                        (fst transactionProcessor).Post (Action (fun () -> 
-                           observable.Next ([{Key = {UUIDKey.Key = result.key}; Value = result.value}], (readTopicName, partitionNumber, position))
-                           db.Write(wb)
-                           wb.Clear() |> ignore
-                           match result.position with
-                           | (_, _, Offset offset) -> index.Put {StringKey.Key = $"storedPosition-{partitionNumber}"} (Some offset)
-                           | _ -> printfn "The offset has been set to an invalid value (probaly a sentinal)"
-                           if x % 100 = 0 then 
-                              printfn "partitionNumber = %A, stored: %A %A %A %A %A %A %A %A" partitionNumber x writeCounter getCounter rangeCounter writeBatchCounter reduceCounter testCounter result.key
-                              printfn "stopwatches: global: %A merge: %A rocks: %A reduce: %A primary: %A secondary: %A rgkey: %A rrange: %A rfold: %A rwb: %A rramindex: %A testStopwatch: %A" 
-                                 globalStopwatch.ElapsedMilliseconds 
-                                 mergeStopwatch.ElapsedMilliseconds 
-                                 rocksStopwatch.ElapsedMilliseconds 
-                                 reduceStopwatch.ElapsedMilliseconds 
-                                 primaryStopwatch.ElapsedMilliseconds 
-                                 secondaryStopwatch.ElapsedMilliseconds
-                                 reduceGroupKeyStopwatch.ElapsedMilliseconds
-                                 reduceRangeStopwatch.ElapsedMilliseconds
-                                 reduceFoldStopwatch.ElapsedMilliseconds
-                                 reduceWriteBatchStopwatch.ElapsedMilliseconds
-                                 reduceRamindexStopwatch.ElapsedMilliseconds
-                                 testStopwatch.ElapsedMilliseconds
-                           x <- x + 1
-                        ))
-               with e ->
-                  printfn "foooooeeee"
-                  printfn "%A" e
-                  raise e
-            } |> Async.Start
-         )
-         observable
-
-
    // hostAndPort should look something like kafka:9093 or localhost:9092 or something like that
    let sourceNode 
       (wb: WriteBatch)
@@ -602,12 +491,10 @@ module Indexer =
             async {
                let configedPosition = index.Get {StringKey.Key = $"storedPosition-{partitionNumber}"}
                try
-                  printfn "topic: %A --- 1" topicName
                   let kafkaServerConnection = new KafkaServerConnection(hostAndPort)
                   let stateTopic = TopicDefinition.CreateOptional<'Value> (topicName, StateTopic) 
                   let topicNamePartitionOffset = Option.map (fun i -> (topicName, Partition partitionNumber, Offset (i + 1L))) configedPosition
                   let! topic = kafkaServerConnection.OpenReaderAsync(stateTopic, partitionNumber, ?startPosition = topicNamePartitionOffset)
-                  printfn "topic: %A --- 2" topicName
 
                   let mutable x = 0
                   while true do
@@ -620,7 +507,6 @@ module Indexer =
                         while (fst transactionProcessor).CurrentQueueLength > 1000 do
                            do! Async.Sleep(100)
                         (fst transactionProcessor).Post (Action (fun () -> 
-//////                           observable.Next [{Key = {UUIDKey.Key = result.key}; Value = result.value}]
                            observable.Next ([{Key = {UUIDKey.Key = result.key}; Value = result.value}], (topicName, partitionNumber, position))
                            db.Write(wb)
                            wb.Clear() |> ignore
@@ -645,7 +531,6 @@ module Indexer =
                            x <- x + 1
                         ))
                with e ->
-                  printfn "foooooeeee"
                   printfn "%A" e
                   raise e
             } |> Async.Start
