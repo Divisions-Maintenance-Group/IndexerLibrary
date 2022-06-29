@@ -448,8 +448,8 @@ module Indexer =
          }
       )
    
-   let getSnapshot (transactionProcessor: MailboxProcessor<TransactionMessage> * (unit -> bool)) = 
-      (fst transactionProcessor).PostAndReply(fun rc -> GetSnapshot rc)
+   let getSnapshot (transactionProcessor: MailboxProcessor<TransactionMessage>) = 
+      transactionProcessor.PostAndReply(fun rc -> GetSnapshot rc)
 
    let testSource (): Subject<Upsert<IKeyable<'Key>, 'Value> seq> = 
            let s = Subject<Upsert<IKeyable<'Key>, 'Value> seq>()
@@ -478,7 +478,7 @@ module Indexer =
       (rocksDbName) 
       (topicName: string) 
       (hostAndPort: string) 
-      (transactionProcessor: MailboxProcessor<TransactionMessage> * (unit -> bool))
+      (transactionProcessor: MailboxProcessor<TransactionMessage>)
       : IObservable<seq<Upsert<IKeyable<UUID>, 'Value>> * SourceNodePosition> = 
 
          let numPartitions = getNumberOfPartitions (topicName) (hostAndPort)
@@ -504,9 +504,9 @@ module Indexer =
                            | (_, _, Offset(x)) -> x
                            | _ -> 0L
 
-                        while (fst transactionProcessor).CurrentQueueLength > 1000 do
+                        while transactionProcessor.CurrentQueueLength > 1000 do
                            do! Async.Sleep(100)
-                        (fst transactionProcessor).Post (Action (fun () -> 
+                        transactionProcessor.Post (Action (fun () -> 
                            observable.Next ([{Key = {UUIDKey.Key = result.key}; Value = result.value}], (topicName, partitionNumber, position))
                            db.Write(wb)
                            wb.Clear() |> ignore
