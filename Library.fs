@@ -895,11 +895,13 @@ module Indexer =
       observable
    
    let exportNode
+      (wb: WriteBatch)
+      (db: RocksDb)
       (kafkaBootstrapServers)
       (outputTopicName)
       (messageParser: Google.Protobuf.MessageParser<'Envelope> when 'Envelope :> Google.Protobuf.IMessage) /// something like Dmg.Providers.V1.ProviderOrg.Parser
-      (index: IIndex<UUID, 'Value option * ('Value * SourceNodePosition) option>)
-      (positionDict: IIndex<string, int64 * int64>)
+      (indexName: string)
+      (positionDictName: string)
       (createEnvelope: SourceNodePosition -> 'Value option -> 'Envelope option when 'Envelope :> Google.Protobuf.IMessage and 'Value :> Google.Protobuf.IMessage)
       (pullPositionAndValueFromEnvelope: 'Envelope -> SourceNodePosition * 'Value when 'Envelope :> Google.Protobuf.IMessage and 'Value :> Google.Protobuf.IMessage)
       (source: IObservable<Delta<IKeyable<UUID>, 'Value> seq * SourceNodePosition> when 'Value :> Google.Protobuf.IMessage)
@@ -907,6 +909,9 @@ module Indexer =
       let outputTopic = Kafka.Kafka($"{kafkaBootstrapServers}", outputTopicName)
       let mutable okToProcess = false
 ////      ////let positionDict = Dictionary<string * int, int64 * int64>()
+
+      let index = (new RocksIndex<UUID, 'Value option * ('Value * SourceNodePosition) option>(db, wb, indexName) :> IIndex<UUID, 'Value option * ('Value * SourceNodePosition) option>) 
+      let positionDict = (new RocksIndex<string, int64 * int64>(db, wb, positionDictName) :> IIndex<string, int64 * int64>) 
 
       async {
          outputTopic.readWholeStream
