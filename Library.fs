@@ -13,6 +13,74 @@ open Indexer.Topics
 type RepeatedField<'a> = Google.Protobuf.Collections.RepeatedField<'a>
 type MapField<'TKey,'TValue> = Google.Protobuf.Collections.MapField<'TKey,'TValue>
 
+module Kafka = 
+    open Confluent.Kafka;
+
+    type Kafka(bootstrapServers: string, topic: string) = 
+        let bootstrapServers = bootstrapServers
+        let topic = topic
+        let pConfig = ProducerConfig()
+        do
+            pConfig.BootstrapServers <- bootstrapServers ///"host1:9092,host2:9092"
+            pConfig.ClientId <- UUID.New().ToString()
+            pConfig.BatchSize <- 16384
+            pConfig.LingerMs <- 100
+            let r = System.Text.RegularExpressions.Regex(":9092$")
+            let isPlainText = r.Match(bootstrapServers).Success
+            if not isPlainText then pConfig.SecurityProtocol <- Confluent.Kafka.SecurityProtocol.Ssl
+        let producer = ProducerBuilder<byte[], byte[]>(pConfig).Build()
+
+        member self.getCurrentHeadOffset() = 
+            let cConfig = new ConsumerConfig()
+            cConfig.BootstrapServers <- bootstrapServers//"host1:9092,host2:9092"
+            cConfig.GroupId <- UUID.New().ToString()
+            cConfig.AutoOffsetReset <- AutoOffsetReset.Earliest
+            let r = System.Text.RegularExpressions.Regex(":9092$")
+            let isPlainText = r.Match(bootstrapServers).Success
+            if not isPlainText then cConfig.SecurityProtocol <- Confluent.Kafka.SecurityProtocol.Ssl
+            use consumer = ConsumerBuilder<byte[], byte[]>(cConfig).Build()
+            consumer.Subscribe(topic)
+            let current_offset_plus_one = (consumer.QueryWatermarkOffsets (Confluent.Kafka.TopicPartition(topic, 0), System.TimeSpan.FromMilliseconds(5000))).High.Value
+            max 0L (current_offset_plus_one - 1L)
+
+        member self.readWholeStream(lineProcessor: (UUID -> byte[] -> int64 -> unit)) = 
+            let cConfig = new ConsumerConfig()
+            cConfig.BootstrapServers <- bootstrapServers//"host1:9092,host2:9092"
+            cConfig.GroupId <- UUID.New().ToString()
+            cConfig.AutoOffsetReset <- AutoOffsetReset.Earliest
+            let r = System.Text.RegularExpressions.Regex(":9092$")
+            let isPlainText = r.Match(bootstrapServers).Success
+            if not isPlainText then cConfig.SecurityProtocol <- Confluent.Kafka.SecurityProtocol.Ssl
+            use consumer = ConsumerBuilder<byte[], byte[]>(cConfig).Build()
+            consumer.Subscribe(topic)
+            let current_offset_plus_one = (consumer.QueryWatermarkOffsets (Confluent.Kafka.TopicPartition(topic, 0), System.TimeSpan.FromMilliseconds(5000))).High.Value
+            let mutable result = consumer.Consume(5000)
+            let mutable exit = false
+            if result <> null then
+                while current_offset_plus_one - 1L >= result.Offset.Value && not exit do
+                    let key = 
+                        match (UUID.New result.Message.Key) with
+                        | Ok(x) -> x | Error(x) -> failwith "UUID wasn't correct"
+                    let value = result.Message.Value
+                    let offset = result.Offset.Value
+                    lineProcessor key value offset
+                    if current_offset_plus_one - 1L > result.Offset.Value then 
+                        result <- consumer.Consume()
+                    else
+                        exit <- true
+            consumer.Close();
+
+        member self.writeLineToStream(uuid: UUID, line: byte[]) = 
+            async {
+                let uuidstuff = uuid.GetBytes
+                let! result = producer.ProduceAsync (
+                    topic, 
+                    new Message<byte[], byte[]>(Key = uuidstuff, Value = line)) |> Async.AwaitTask
+                return result.Offset.Value
+            }
+
+
+
 module Indexer = 
    type Upsert<'Key, 'Value> = {
       Key: 'Key
@@ -100,6 +168,7 @@ module Indexer =
       abstract Range: IKeyable<'Key> -> IKeyable<'Key> -> Option<IKeyable<'Key> -> IKeyable<'Key> -> int> -> seq<Upsert<IKeyable<'Key>, 'T>>
       abstract RangeUsingSnapshot: IKeyable<'Key> -> IKeyable<'Key> -> Option<IKeyable<'Key> -> IKeyable<'Key> -> int> -> Snapshot -> seq<Upsert<IKeyable<'Key>, 'T>>
       abstract GetAll: unit -> list<Upsert<IKeyable<'Key>, 'T>>
+      abstract GetAllAsSequence: unit -> seq<Upsert<IKeyable<'Key>, 'T>>
 
    let cache = PicklerCache.FromCustomPicklerRegistry (IndexerLibrary.Protobuf.FSharp.Pickler.createRegistry ())
    let bs = FsPickler.CreateBinarySerializer(picklerResolver = cache)
@@ -239,6 +308,17 @@ module Indexer =
                                              )
                               |> Seq.toList
          sequence
+      member private this.getallAsSequence() = 
+         use iter = (db.NewIterator(cf))
+         iter.SeekToFirst() |> ignore
+         let sequence = iter |> Seq.unfold (fun iter -> 
+                                                if iter.Valid () then
+                                                   let (key: IKeyable<'Key>, value: 'T) = bs.UnPickle (iter.Value())
+                                                   Some ({Key = key; Value = Some value}, iter.Next())
+                                                else
+                                                   None
+                                             )
+         sequence
       member private this.range (startKey:IKeyable<'Key>) (endKey:IKeyable<'Key>) (comparer: Option<IKeyable<'Key> -> IKeyable<'Key> -> int>) (snapshot: Option<Snapshot>) : IEnumerable<Upsert<IKeyable<'Key>, 'T>> = 
          rocksStopwatch.Start()
          rangeCounter <- rangeCounter + 1L
@@ -299,6 +379,9 @@ module Indexer =
          member this.GetAll () = 
             let something = this.getall()
             something
+         member this.GetAllAsSequence () = 
+            let something = this.getallAsSequence()
+            something
             
    type RamIndex<'Key, 'T>() = // when 'Key : comparison>() =
       let dict = new SortedDictionary<IKeyable<'Key>, 'T>(ComparisonIdentity.FromFunction(fun (a: IKeyable<'Key>) b -> a.Compare(b) ))
@@ -340,6 +423,8 @@ module Indexer =
             []
          member this.GetAll () =
             this.getAll() |> Seq.map (fun i -> {Key = i.Key; Value = Some i.Value}) |> Seq.toList
+         member this.GetAllAsSequence () =
+            this.getAll() |> Seq.map (fun i -> {Key = i.Key; Value = Some i.Value})
 
    type MergeValues<'Value> = {
       Left: Option<'Value>
@@ -350,21 +435,44 @@ module Indexer =
    type TransactionMessage = 
       | Action of a: (unit -> unit)
       | GetSnapshot of AsyncReplyChannel<Snapshot>
+      | RegisterSourceNode of a: string
+      | MarkEndOfRegistration
+      | MarkEndOfRebuildForOneSourceNode of a: string
    let createTransactionProcessor (db: RocksDb) = 
-      MailboxProcessor.Start(fun inbox ->
-         let token = ts.Token
-         async {     
-            while not ts.IsCancellationRequested do
+      let mutable areAllRebuildsComplete = false
+      let mailboxProcessor = 
+         MailboxProcessor.Start(fun inbox ->
+            let token = ts.Token
+            let rec loop registrations registrationsComplete = async {
                let! msg = inbox.Receive()
-               if not ts.IsCancellationRequested then
-                  match msg with
-                  | Action a -> a ()
-                  | GetSnapshot(reply) -> reply.Reply(db.CreateSnapshot())
-         }
-      )
+               let state = 
+                  if not ts.IsCancellationRequested then
+                     match msg with
+                     | Action a -> 
+                        a ()
+                        (registrations, registrationsComplete)
+                     | GetSnapshot(reply) -> 
+                        reply.Reply(db.CreateSnapshot())
+                        (registrations, registrationsComplete)
+                     | RegisterSourceNode(sourceNodeUniqueIdentifier) -> 
+                        (registrations |> Map.add sourceNodeUniqueIdentifier false, registrationsComplete)
+                     | MarkEndOfRegistration -> 
+                        (registrations, true)
+                     | MarkEndOfRebuildForOneSourceNode(sourceNodeUniqueIdentifier) -> 
+                        (registrations |> Map.add sourceNodeUniqueIdentifier true, registrationsComplete)
+                  else
+                     registrations, registrationsComplete
+               areAllRebuildsComplete <- snd state && fst state |> Map.forall (fun _ value -> value) 
+               if not ts.IsCancellationRequested then return! loop (fst state) (snd state)
+            }
+            let registrations = Map.empty
+            let registrationsComplete = false
+            loop registrations registrationsComplete
+         )
+      (mailboxProcessor, fun () -> areAllRebuildsComplete)
    
-   let getSnapshot (transactionProcessor: MailboxProcessor<TransactionMessage>) = 
-      transactionProcessor.PostAndReply(fun rc -> GetSnapshot rc)
+   let getSnapshot (transactionProcessor: MailboxProcessor<TransactionMessage> * (unit -> bool)) = 
+      (fst transactionProcessor).PostAndReply(fun rc -> GetSnapshot rc)
 
    let testSource (): Subject<Upsert<IKeyable<'Key>, 'Value> seq> = 
            let s = Subject<Upsert<IKeyable<'Key>, 'Value> seq>()
@@ -384,39 +492,65 @@ module Indexer =
             .Topics.SingleOrDefault(fun i -> i.Topic = topicName)
             .Partitions.Count
    
+   type SourceNodePosition = string * int * int64
+
 
    // hostAndPort should look something like kafka:9093 or localhost:9092 or something like that
-   let sourceNode 
+   let sourceNodeForTransform 
       (wb: WriteBatch)
       (db: RocksDb) 
       (rocksDbName) 
-      (topicName: string) 
+      (readTopicName: string) 
+      (writeTopicName: string) 
       (hostAndPort: string) 
-      (transactionProcessor: MailboxProcessor<TransactionMessage>)
-      : IObservable<seq<Upsert<IKeyable<UUID>, 'Value>>> = 
+      (transactionProcessor: MailboxProcessor<TransactionMessage> * (unit -> bool))
+      : IObservable<seq<Upsert<IKeyable<UUID>, 'Value>> * SourceNodePosition> = 
 
-         let numPartitions = getNumberOfPartitions (topicName) (hostAndPort)
+         let numPartitions = getNumberOfPartitions (readTopicName) (hostAndPort)
          let partitionNumbers = seq { 0 .. (numPartitions-1) }
 
          let index = (new RocksIndex<string, int64>(db, wb, rocksDbName) :> IIndex<string, int64>) 
-         let observable = Subject<Upsert<IKeyable<UUID>, 'Value> seq>()
+         let observable = Subject<Upsert<IKeyable<UUID>, 'Value> seq * SourceNodePosition>()
 
+         //// TODO: need to put a rebuild phase in here
+         let configedPositions = 
+            partitionNumbers |> Seq.map (fun partitionNumber -> 
+               let configedPosition = index.Get {StringKey.Key = $"storedPosition-{partitionNumber}"}
+               (partitionNumber, configedPosition |> Option.defaultValue 0))
+         
+
+         
+
+         
+         
+         
+
+
+         /// This is the old read logic
          partitionNumbers |> Seq.iter (fun partitionNumber -> 
             async {
                let configedPosition = index.Get {StringKey.Key = $"storedPosition-{partitionNumber}"}
                try
+                  printfn "topic: %A --- 1" readTopicName
                   let kafkaServerConnection = new KafkaServerConnection(hostAndPort)
-                  let stateTopic = TopicDefinition.CreateOptional<'Value> (topicName, StateTopic) 
-                  let topicNamePartitionOffset = Option.map (fun i -> (topicName, Partition partitionNumber, Offset (i + 1L))) configedPosition
+                  let stateTopic = TopicDefinition.CreateOptional<'Value> (readTopicName, StateTopic) 
+                  let topicNamePartitionOffset = Option.map (fun i -> (readTopicName, Partition partitionNumber, Offset (i + 1L))) configedPosition
                   let! topic = kafkaServerConnection.OpenReaderAsync(stateTopic, partitionNumber, ?startPosition = topicNamePartitionOffset)
+                  printfn "topic: %A --- 2" readTopicName
+
 
                   let mutable x = 0
                   while true do
                         let! result = topic.Read ()
-                        while transactionProcessor.CurrentQueueLength > 1000 do
+                        let position = 
+                           match result.position with
+                           | (_, _, Offset(x)) -> x
+                           | _ -> 0L
+
+                        while (fst transactionProcessor).CurrentQueueLength > 1000 do
                            do! Async.Sleep(100)
-                        transactionProcessor.Post (Action (fun () -> 
-                           observable.Next [{Key = {UUIDKey.Key = result.key}; Value = result.value}]
+                        (fst transactionProcessor).Post (Action (fun () -> 
+                           observable.Next ([{Key = {UUIDKey.Key = result.key}; Value = result.value}], (readTopicName, partitionNumber, position))
                            db.Write(wb)
                            wb.Clear() |> ignore
                            match result.position with
@@ -440,6 +574,78 @@ module Indexer =
                            x <- x + 1
                         ))
                with e ->
+                  printfn "foooooeeee"
+                  printfn "%A" e
+                  raise e
+            } |> Async.Start
+         )
+         observable
+
+
+   // hostAndPort should look something like kafka:9093 or localhost:9092 or something like that
+   let sourceNode 
+      (wb: WriteBatch)
+      (db: RocksDb) 
+      (rocksDbName) 
+      (topicName: string) 
+      (hostAndPort: string) 
+      (transactionProcessor: MailboxProcessor<TransactionMessage> * (unit -> bool))
+      : IObservable<seq<Upsert<IKeyable<UUID>, 'Value>> * SourceNodePosition> = 
+
+         let numPartitions = getNumberOfPartitions (topicName) (hostAndPort)
+         let partitionNumbers = seq { 0 .. (numPartitions-1) }
+
+         let index = (new RocksIndex<string, int64>(db, wb, rocksDbName) :> IIndex<string, int64>) 
+         let observable = Subject<Upsert<IKeyable<UUID>, 'Value> seq * SourceNodePosition>()
+
+         partitionNumbers |> Seq.iter (fun partitionNumber -> 
+            async {
+               let configedPosition = index.Get {StringKey.Key = $"storedPosition-{partitionNumber}"}
+               try
+                  printfn "topic: %A --- 1" topicName
+                  let kafkaServerConnection = new KafkaServerConnection(hostAndPort)
+                  let stateTopic = TopicDefinition.CreateOptional<'Value> (topicName, StateTopic) 
+                  let topicNamePartitionOffset = Option.map (fun i -> (topicName, Partition partitionNumber, Offset (i + 1L))) configedPosition
+                  let! topic = kafkaServerConnection.OpenReaderAsync(stateTopic, partitionNumber, ?startPosition = topicNamePartitionOffset)
+                  printfn "topic: %A --- 2" topicName
+
+                  let mutable x = 0
+                  while true do
+                        let! result = topic.Read ()
+                        let position = 
+                           match result.position with
+                           | (_, _, Offset(x)) -> x
+                           | _ -> 0L
+
+                        while (fst transactionProcessor).CurrentQueueLength > 1000 do
+                           do! Async.Sleep(100)
+                        (fst transactionProcessor).Post (Action (fun () -> 
+//////                           observable.Next [{Key = {UUIDKey.Key = result.key}; Value = result.value}]
+                           observable.Next ([{Key = {UUIDKey.Key = result.key}; Value = result.value}], (topicName, partitionNumber, position))
+                           db.Write(wb)
+                           wb.Clear() |> ignore
+                           match result.position with
+                           | (_, _, Offset offset) -> index.Put {StringKey.Key = $"storedPosition-{partitionNumber}"} (Some offset)
+                           | _ -> printfn "The offset has been set to an invalid value (probaly a sentinal)"
+                           if x % 100 = 0 then 
+                              printfn "partitionNumber = %A, stored: %A %A %A %A %A %A %A %A" partitionNumber x writeCounter getCounter rangeCounter writeBatchCounter reduceCounter testCounter result.key
+                              printfn "stopwatches: global: %A merge: %A rocks: %A reduce: %A primary: %A secondary: %A rgkey: %A rrange: %A rfold: %A rwb: %A rramindex: %A testStopwatch: %A" 
+                                 globalStopwatch.ElapsedMilliseconds 
+                                 mergeStopwatch.ElapsedMilliseconds 
+                                 rocksStopwatch.ElapsedMilliseconds 
+                                 reduceStopwatch.ElapsedMilliseconds 
+                                 primaryStopwatch.ElapsedMilliseconds 
+                                 secondaryStopwatch.ElapsedMilliseconds
+                                 reduceGroupKeyStopwatch.ElapsedMilliseconds
+                                 reduceRangeStopwatch.ElapsedMilliseconds
+                                 reduceFoldStopwatch.ElapsedMilliseconds
+                                 reduceWriteBatchStopwatch.ElapsedMilliseconds
+                                 reduceRamindexStopwatch.ElapsedMilliseconds
+                                 testStopwatch.ElapsedMilliseconds
+                           x <- x + 1
+                        ))
+               with e ->
+                  printfn "foooooeeee"
                   printfn "%A" e
                   raise e
             } |> Async.Start
@@ -543,14 +749,14 @@ module Indexer =
 
    let secondaryIndexNodeStateless 
                   (userSuppliedKeyValueMappingFunction: IKeyable<'Key> -> 'Value -> seq<IKeyable<'NewKey> * 'NewValue>) 
-                  (source: IObservable<Delta<IKeyable<'Key>, 'Value> seq>)
-                  : IObservable<Delta<IKeyable<CompoundKey<'NewKey, 'Key>>, 'NewValue> seq> = 
-      let observable = Subject<Delta<IKeyable<CompoundKey<'NewKey, 'Key>>, 'NewValue> seq>()
+                  (source: IObservable<Delta<IKeyable<'Key>, 'Value> seq * SourceNodePosition>)
+                  : IObservable<Delta<IKeyable<CompoundKey<'NewKey, 'Key>>, 'NewValue> seq * SourceNodePosition> = 
+      let observable = Subject<Delta<IKeyable<CompoundKey<'NewKey, 'Key>>, 'NewValue> seq * SourceNodePosition>()
 
       //A helper function so I can get values out of dictionaries as options rather than having to deal with exceptions and nonsense
       let get key (dictionary: IDictionary<_, _>) : Option<'T> = try Some dictionary.[key] with | :? System.Collections.Generic.KeyNotFoundException -> None
 
-      source |> Observable.add (fun deltas -> 
+      source |> Observable.add (fun (deltas, position) -> 
          try 
             secondaryStopwatch.Start()
             let emits = deltas 
@@ -580,7 +786,7 @@ module Indexer =
                      |> Seq.concat
             let emits = emits |> Seq.toList
             secondaryStopwatch.Stop()
-            if not (Seq.isEmpty emits) then observable.Next emits
+            if not (Seq.isEmpty emits) then observable.Next (emits, position)
          with e ->
             printfn "%A" e
             raise e
@@ -593,11 +799,11 @@ module Indexer =
       (db: RocksDb)
       (rocksDbName: string)
       (comparer: Option<IKeyable<'Key> -> IKeyable<'Key> -> int>)
-      (source: IObservable<Upsert<IKeyable<'Key>, 'Value> seq>)
-      : PartiallySubscribableSubject<IKeyable<'Key>, 'Value, Delta<IKeyable<'Key>, 'Value> seq> = 
+      (source: IObservable<Upsert<IKeyable<'Key>, 'Value> seq * SourceNodePosition>)
+      : PartiallySubscribableSubject<IKeyable<'Key>, 'Value, Delta<IKeyable<'Key>, 'Value> seq * SourceNodePosition> = 
       let index = (new RocksIndex<'Key, 'Value>(db, wb, rocksDbName) :> IIndex<'Key, 'Value>) 
       let observers = new List<IKeyable<'Key> * IKeyable<'Key> * Subject<Upsert<IKeyable<'Key>, 'Value> seq>>()
-      let observable = PartiallySubscribableSubject<IKeyable<'Key>, 'Value, Delta<IKeyable<'Key>, 'Value> seq>( fun key1 key2 userSuppliedSubscriptionHandler ->
+      let observable = PartiallySubscribableSubject<IKeyable<'Key>, 'Value, Delta<IKeyable<'Key>, 'Value> seq * SourceNodePosition>( fun key1 key2 userSuppliedSubscriptionHandler ->
          let observer = new Subject<Upsert<IKeyable<'Key>, 'Value> seq>()
          let disposable = observer.Subscribe( fun i -> userSuppliedSubscriptionHandler i )
          observer |> HelperFunctions.sendInitialGetToSubscriber key1 
@@ -614,7 +820,7 @@ module Indexer =
          a
       )
 
-      source |> Observable.add (fun upserts -> 
+      source |> Observable.add (fun (upserts, position) -> 
          try
             primaryStopwatch.Start()
             let emits = 
@@ -643,7 +849,7 @@ module Indexer =
             let emits = emits |> Seq.toList
             observers |> HelperFunctions.updateSubscriptions comparer emits
             primaryStopwatch.Stop()
-            if not (Seq.isEmpty emits) then observable.Next emits
+            if not (Seq.isEmpty emits) then observable.Next (emits, position)
          with e ->
             printfn "%A" e
             raise e
@@ -652,15 +858,15 @@ module Indexer =
       observable
 
    let mergeNode 
-      (sourcesWithName: (IObservable<Upsert<IKeyable<_>, _> seq> * string) seq)
-      : IObservable<Upsert<IKeyable<CompoundKey<_, _>>, 'Value> seq> = 
-         let observable = Subject<Upsert<IKeyable<CompoundKey<_, _>>, 'Value> seq>()
+      (sourcesWithName: (IObservable<Upsert<IKeyable<_>, _> seq * SourceNodePosition> * string) seq)
+      : IObservable<Upsert<IKeyable<CompoundKey<_, _>>, 'Value> seq * SourceNodePosition> = 
+         let observable = Subject<Upsert<IKeyable<CompoundKey<_, _>>, 'Value> seq * SourceNodePosition>()
 
          for sourceWithName in sourcesWithName do
             (fst sourceWithName) |> Observable.add (fun upserts ->
                try
                   mergeStopwatch.Start()
-                  let emits = upserts 
+                  let emits = (fst upserts) 
                               |> Seq.map (fun upsert ->
                                  let newKey: IKeyable<CompoundKey<_, _>> = {Key1 = upsert.Key; Key2 = {Key = snd sourceWithName}}
                                  let emit = {Key = newKey; Value = upsert.Value}
@@ -668,7 +874,7 @@ module Indexer =
                               )
                   let emits = emits |> Seq.toList
                   mergeStopwatch.Stop()
-                  observable.Next emits
+                  observable.Next (emits, snd upserts)
                with e ->
                   printfn "%A" e
                   raise e
@@ -688,11 +894,11 @@ module Indexer =
       provideDefaultValue
       mapLeft
       mapRight
-      (source: IObservable<Delta<IKeyable<CompoundKey<'Key, string>>, 'Value> seq>)
-      : IObservable<seq<Delta<IKeyable<'Key>, 'NewValue>>>
+      (source: IObservable<Delta<IKeyable<CompoundKey<'Key, string>>, 'Value> seq * SourceNodePosition>)
+      : IObservable<seq<Delta<IKeyable<'Key>, 'NewValue>> * SourceNodePosition>
       = 
          let index = (new RocksIndex<CompoundKey<'Key, _>, 'Value>(db, wb, rocksDbName) :> IIndex<CompoundKey<'Key, _>, 'Value>) 
-         let observable = Subject<Delta<IKeyable<'Key>, 'NewValue> seq>()
+         let observable = Subject<Delta<IKeyable<'Key>, 'NewValue> seq * SourceNodePosition>()
          let compareFunction = (fun x y -> if x.Key1.Compare(y.Key1) < 0 then -1 else if x.Key1.Compare(y.Key1) > 0 then 1 else 0)
 
 
@@ -734,7 +940,7 @@ module Indexer =
             returnValue
          )
 
-         source |> Observable.add (fun deltas ->
+         source |> Observable.add (fun (deltas, position) ->
             try
                reduceCounter <- reduceCounter + 1L
                reduceStopwatch.Start()
@@ -779,7 +985,7 @@ module Indexer =
                let emits = emits |> Seq.choose (fun i -> i)
                let emits = emits |> Seq.toList
                reduceStopwatch.Stop()
-               observable.Next emits
+               observable.Next (emits, position)
             with e ->
                printfn "%A" e
                raise e
@@ -787,18 +993,95 @@ module Indexer =
          observable :> IObservable<_>
 
    let deltaToUpserNode 
-      (source: IObservable<Delta<'Key, 'Value> seq>)
-      : IObservable<seq<Upsert<'Key, 'Value>>> = 
-      let observable = Subject<Upsert<'Key, 'Value> seq>()
-      source |> Observable.add (fun deltas ->
+      (source: IObservable<Delta<'Key, 'Value> seq * SourceNodePosition>)
+      : IObservable<seq<Upsert<'Key, 'Value>> * SourceNodePosition> = 
+      let observable = Subject<Upsert<'Key, 'Value> seq * SourceNodePosition>()
+      source |> Observable.add (fun (deltas, position) ->
          try
             let emits = 
                deltas 
                |> Seq.map ( fun delta -> {Key = delta.Key; Value = delta.NextValue})
                |> Seq.toList
-            observable.Next emits
+            observable.Next (emits, position)
          with e ->
             printfn "%A" e
             raise e
       )
       observable
+   
+   let exportNode
+      (kafkaBootstrapServers)
+      (outputTopicName)
+      (messageParser: Google.Protobuf.MessageParser<'Envelope> when 'Envelope :> Google.Protobuf.IMessage) /// something like Dmg.Providers.V1.ProviderOrg.Parser
+      (index: IIndex<UUID, 'Value option * ('Value * SourceNodePosition) option>)
+      (createEnvelope: SourceNodePosition -> 'Value option -> 'Envelope option when 'Envelope :> Google.Protobuf.IMessage and 'Value :> Google.Protobuf.IMessage)
+      (pullPositionAndValueFromEnvelope: 'Envelope -> SourceNodePosition * 'Value when 'Envelope :> Google.Protobuf.IMessage and 'Value :> Google.Protobuf.IMessage)
+      (source: IObservable<Delta<IKeyable<UUID>, 'Value> seq * SourceNodePosition> when 'Value :> Google.Protobuf.IMessage)
+      : unit = 
+      let outputTopic = Kafka.Kafka($"{kafkaBootstrapServers}", outputTopicName)
+      let mutable okToProcess = false
+      let positionDict = Dictionary<string * int, int64 * int64>()
+
+      async {
+         outputTopic.readWholeStream
+            (
+               fun uuid data offset -> 
+                  if data |> Array.isEmpty then
+                     index.Put {UUIDKey.Key = uuid} (Some (None, None)) 
+                  else
+                     let (id, partition, position), value = messageParser.ParseFrom(data) |> pullPositionAndValueFromEnvelope
+                     positionDict.[(id, partition)] <- (position, 0L)
+                     index.Put {UUIDKey.Key = uuid} (Some (Some value, None))
+            )
+         okToProcess <- true
+      } |> Async.Start
+
+      source 
+      |> Observable.add (fun (deltas, position) ->
+         try
+            while not okToProcess do
+               async {do! Async.Sleep(100)} |> Async.RunSynchronously
+            deltas
+            |> Seq.iter (fun delta -> 
+               let storedValues = index.Get delta.Key
+               index.Put 
+                  delta.Key 
+                  (
+                     match storedValues with
+                     | None -> Some (None, delta.NextValue |> Option.map (fun i -> (i, position)))
+                     | Some(x) -> Some(fst x, delta.NextValue |> Option.map (fun i -> (i, position)))
+                  )
+               let id, partition, position = position
+               let found, (lpos, rpos) = positionDict.TryGetValue((id, partition))
+               if found then
+                  positionDict.[(id, partition)] <- (lpos, position)
+               else
+                  positionDict.[(id, partition)] <- (0L, position)
+            )
+
+            if positionDict.All(fun kvp -> fst kvp.Value <= snd kvp.Value) then
+               index.GetAllAsSequence()
+               |> Seq.iter (fun i -> 
+                  let (lvalue, rvalueWPosition) = i.Value.Value
+                  let rvalue = 
+                     match rvalueWPosition with
+                     | None -> None
+                     | Some(v, p) -> Some(v)
+                  let rvaluePos = 
+                     match rvalueWPosition with
+                     |None -> None
+                     |Some(v, p) -> Some(p)
+                  if lvalue <> rvalue then
+                     async {
+                        let optionalBytes = (createEnvelope (rvaluePos |> Option.defaultValue ("", 0 ,0L)) rvalue) |> Option.map Google.Protobuf.MessageExtensions.ToByteArray
+                        let! outputTopicWrittenOffset = outputTopic.writeLineToStream(i.Key.GetKey(), optionalBytes |> Option.defaultValue null)
+                        ()
+                     } |> Async.RunSynchronously
+                     index.Put i.Key None
+                  else
+                     index.Put i.Key None
+               )
+         with e ->
+            printfn "%A" e
+            raise e
+      )
