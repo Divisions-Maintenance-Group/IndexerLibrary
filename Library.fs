@@ -168,7 +168,7 @@ module Indexer =
       abstract Range: IKeyable<'Key> -> IKeyable<'Key> -> Option<IKeyable<'Key> -> IKeyable<'Key> -> int> -> seq<Upsert<IKeyable<'Key>, 'T>>
       abstract RangeUsingSnapshot: IKeyable<'Key> -> IKeyable<'Key> -> Option<IKeyable<'Key> -> IKeyable<'Key> -> int> -> Snapshot -> seq<Upsert<IKeyable<'Key>, 'T>>
       abstract GetAll: unit -> list<Upsert<IKeyable<'Key>, 'T>>
-      abstract GetAllAsSequence: unit -> seq<Upsert<IKeyable<'Key>, 'T>>
+      abstract GetAllAsSequence: unit -> seq<Upsert<IKeyable<'Key>, 'T>> * Iterator
 
    let cache = PicklerCache.FromCustomPicklerRegistry (IndexerLibrary.Protobuf.FSharp.Pickler.createRegistry ())
    let bs = FsPickler.CreateBinarySerializer(picklerResolver = cache)
@@ -309,7 +309,7 @@ module Indexer =
                               |> Seq.toList
          sequence
       member private this.getallAsSequence() = 
-         use iter = (db.NewIterator(cf))
+         let iter = (db.NewIterator(cf))
          iter.SeekToFirst() |> ignore
          let sequence = iter |> Seq.unfold (fun iter -> 
                                                 if iter.Valid () then
@@ -318,7 +318,8 @@ module Indexer =
                                                 else
                                                    None
                                              )
-         sequence
+////                              |> Seq.toList
+         sequence, iter
       member private this.range (startKey:IKeyable<'Key>) (endKey:IKeyable<'Key>) (comparer: Option<IKeyable<'Key> -> IKeyable<'Key> -> int>) (snapshot: Option<Snapshot>) : IEnumerable<Upsert<IKeyable<'Key>, 'T>> = 
          rocksStopwatch.Start()
          rangeCounter <- rangeCounter + 1L
@@ -380,8 +381,8 @@ module Indexer =
             let something = this.getall()
             something
          member this.GetAllAsSequence () = 
-            let something = this.getallAsSequence()
-            something
+            let something, iter = this.getallAsSequence()
+            something, iter
             
    type RamIndex<'Key, 'T>() = // when 'Key : comparison>() =
       let dict = new SortedDictionary<IKeyable<'Key>, 'T>(ComparisonIdentity.FromFunction(fun (a: IKeyable<'Key>) b -> a.Compare(b) ))
@@ -424,7 +425,7 @@ module Indexer =
          member this.GetAll () =
             this.getAll() |> Seq.map (fun i -> {Key = i.Key; Value = Some i.Value}) |> Seq.toList
          member this.GetAllAsSequence () =
-            this.getAll() |> Seq.map (fun i -> {Key = i.Key; Value = Some i.Value})
+            (this.getAll() |> Seq.map (fun i -> {Key = i.Key; Value = Some i.Value}), null)
 
    type MergeValues<'Value> = {
       Left: Option<'Value>
@@ -908,7 +909,6 @@ module Indexer =
       : unit = 
       let outputTopic = Kafka.Kafka($"{kafkaBootstrapServers}", outputTopicName)
       let mutable okToProcess = false
-////      ////let positionDict = Dictionary<string * int, int64 * int64>()
 
       let index = (new RocksIndex<UUID, 'Value option * ('Value * SourceNodePosition) option>(db, wb, indexName) :> IIndex<UUID, 'Value option * ('Value * SourceNodePosition) option>) 
       let positionDict = (new RocksIndex<string, int64 * int64>(db, wb, positionDictName) :> IIndex<string, int64 * int64>) 
@@ -917,12 +917,11 @@ module Indexer =
          outputTopic.readWholeStream
             (
                fun uuid data offset -> 
-                  if data |> Array.isEmpty then
+                  if data |> Option.ofObj |> Option.defaultValue (Array.empty) |> Array.isEmpty then
                      index.Put {UUIDKey.Key = uuid} (Some (None, None)) 
                   else
                      let (id, partition, position), value = messageParser.ParseFrom(data) |> pullPositionAndValueFromEnvelope
-                     positionDict.Put {StringKey.Key = $"#{id}: #{partition}"} (Some(position, 0L))
-////                     positionDict.[(id, partition)] <- (position, 0L)
+                     positionDict.Put {StringKey.Key = $"#{id}: #{partition}"} (Some(position, -1L))
                      index.Put {UUIDKey.Key = uuid} (Some (Some value, None))
             )
          okToProcess <- true
@@ -947,13 +946,17 @@ module Indexer =
                let f = positionDict.Get {StringKey.Key = $"#{id}: #{partition}"}
                match f with
                | None ->
-                  positionDict.Put {StringKey.Key = $"#{id}: #{partition}"} (Some(0L, position))
+                  positionDict.Put {StringKey.Key = $"#{id}: #{partition}"} (Some(-1L, position))
                | Some((lpos, rpos)) -> 
                   positionDict.Put {StringKey.Key = $"#{id}: #{partition}"} (Some(lpos, position))
             )
 
-            if positionDict.GetAllAsSequence() |> Seq.forall(fun kvp -> fst kvp.Value.Value <= snd kvp.Value.Value) then
-               index.GetAllAsSequence()
+            let (allPositions, iter) = positionDict.GetAllAsSequence()
+            use iter = iter
+            if allPositions |> Seq.forall(fun kvp -> fst kvp.Value.Value <= snd kvp.Value.Value) then
+               let (allIndexes, indexIter) = index.GetAllAsSequence()
+               use indexIter = indexIter
+               allIndexes 
                |> Seq.iter (fun i -> 
                   let (lvalue, rvalueWPosition) = i.Value.Value
                   let rvalue = 
