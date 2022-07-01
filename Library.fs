@@ -25,6 +25,7 @@ module Kafka =
             pConfig.ClientId <- UUID.New().ToString()
             pConfig.BatchSize <- 16384
             pConfig.LingerMs <- 100
+            pConfig.EnableIdempotence <- true
             let r = System.Text.RegularExpressions.Regex(":9092$")
             let isPlainText = r.Match(bootstrapServers).Success
             if not isPlainText then pConfig.SecurityProtocol <- Confluent.Kafka.SecurityProtocol.Ssl
@@ -972,7 +973,7 @@ module Indexer =
                         let optionalBytes = (createEnvelope (rvaluePos |> Option.defaultValue ("", 0 ,0L)) rvalue) |> Option.map Google.Protobuf.MessageExtensions.ToByteArray
                         let! outputTopicWrittenOffset = outputTopic.writeLineToStream(i.Key.GetKey(), optionalBytes |> Option.defaultValue null)
                         ()
-                     } |> Async.RunSynchronously
+                     } |> Async.Start
                      index.Put i.Key None
                   else
                      index.Put i.Key None
