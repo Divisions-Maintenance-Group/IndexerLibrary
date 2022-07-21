@@ -896,6 +896,58 @@ module Indexer =
             raise e
       )
       observable
+
+   type TimeHelper (currentKey: 'Key, futureDates: ref<Map<DateTime, 'Key>>) = 
+      let currentTime = DateTime.UtcNow
+
+      let isTimeInFuture (timestamp: DateTime) = 
+         if timestamp > currentTime then
+            futureDates.Value <- futureDates.Value |> Map.add timestamp currentKey
+            true
+         else
+            false
+
+   type TimeNodePossibleMessages<'Key, 'Value> =
+      | ProcessFutureDates 
+      | ProcessSourceItem of (Upsert<IKeyable<'Key>, 'Value> seq * SourceNodePosition) 
+
+   let timeNode
+      (wb: WriteBatch)
+      (mappingFunction: 'Value option -> TimeHelper -> 'NewValue option )
+      (source: IObservable<Upsert<IKeyable<'Key>, 'Value> seq * SourceNodePosition>)
+      : IObservable<Upsert<IKeyable<'Key>, 'NewValue> seq * SourceNodePosition> =
+
+      let observable = Subject<Upsert<IKeyable<'Key>, 'NewValue> seq * SourceNodePosition>()
+      let futureDates: ref<Map<DateTime, 'Key>> = ref(Map.empty)
+
+      let processor = MailboxProcessor<TimeNodePossibleMessages<'Key, 'Value>>.Start(fun inbox ->
+         let rec innerLoop () = async {
+            // This way you retrieve message from the mailbox queue
+            // or await them in case the queue empty.
+            // You can think of the `inbox` parameter as a reference to self.
+            let! message = inbox.Receive()
+            // Now you can process the retrieved message.
+            match message with
+            | ProcessFutureDates ->
+               printfn "Hi! This is mailbox processor's inner loop!" 
+            | ProcessSourceItem(upserts, position) ->
+               try
+                  let emits = 
+                     upserts 
+                     |> Seq.map (fun upsert -> {Key = upsert.Key; Value = mappingFunction upsert.Value (TimeHelper(upsert.Key.GetKey(), futureDates))})
+                     |> Seq.toList
+                  observable.Next (emits, position)
+               with e ->
+                  printfn "%A" e
+                  raise e
+            return! innerLoop()
+         }
+         innerLoop ())
+
+      source |> Observable.add (fun (deltas, position) ->
+         processor.Post (ProcessSourceItem(deltas, position))
+      )
+      observable
    
    let exportNode
       (wb: WriteBatch)
