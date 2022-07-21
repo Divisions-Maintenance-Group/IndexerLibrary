@@ -479,6 +479,7 @@ module Indexer =
       (db: RocksDb) 
       (rocksDbName) 
       (topicName: string) 
+      (sourceNodeUniqueIdentifier: string)
       (hostAndPort: string) 
       (transactionProcessor: MailboxProcessor<TransactionMessage>)
       : IObservable<seq<Upsert<IKeyable<UUID>, 'Value>> * SourceNodePosition> = 
@@ -509,7 +510,7 @@ module Indexer =
                         while transactionProcessor.CurrentQueueLength > 1000 do
                            do! Async.Sleep(100)
                         transactionProcessor.Post (Action (fun () -> 
-                           observable.Next ([{Key = {UUIDKey.Key = result.key}; Value = result.value}], (topicName, partitionNumber, position))
+                           observable.Next ([{Key = {UUIDKey.Key = result.key}; Value = result.value}], (sourceNodeUniqueIdentifier, partitionNumber, position))
                            db.Write(wb)
                            wb.Clear() |> ignore
                            match result.position with
