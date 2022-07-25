@@ -482,10 +482,21 @@ module Indexer =
       (sourceNodeUniqueIdentifier: string)
       (hostAndPort: string) 
       (transactionProcessor: MailboxProcessor<TransactionMessage>)
-      : IObservable<seq<Upsert<IKeyable<UUID>, 'Value>> * SourceNodePosition> = 
+      (waitList: (unit -> bool) seq)
+      : IObservable<seq<Upsert<IKeyable<UUID>, 'Value>> * SourceNodePosition> * (unit -> bool) = 
+         async {
+            while not (waitList |> Seq.forall (fun i -> i())) do
+               do! Async.Sleep(100)
+         } |> Async.RunSynchronously
 
          let numPartitions = getNumberOfPartitions (topicName) (hostAndPort)
          let partitionNumbers = seq { 0 .. (numPartitions-1) }
+         let _caughtUpLock = Object()
+         let caughtUpFlags = Dictionary<int, bool>()
+         partitionNumbers |> Seq.iter (fun i -> caughtUpFlags.Add(i, false)) 
+
+         let isThisSourceNodeCaughtUp () = 
+            lock _caughtUpLock (fun _ -> caughtUpFlags |> Seq.forall (fun i -> i.Value))
 
          let index = (new RocksIndex<string, int64>(db, wb, rocksDbName) :> IIndex<string, int64>) 
          let observable = Subject<Upsert<IKeyable<UUID>, 'Value> seq * SourceNodePosition>()
@@ -498,10 +509,12 @@ module Indexer =
                   let stateTopic = TopicDefinition.CreateOptional<'Value> (topicName, StateTopic) 
                   let topicNamePartitionOffset = Option.map (fun i -> (topicName, Partition partitionNumber, Offset (i + 1L))) configedPosition
                   let! topic = kafkaServerConnection.OpenReaderAsync(stateTopic, partitionNumber, ?startPosition = topicNamePartitionOffset)
+                  let endOfTopicPlusOne = topic.QueryWatermarkOffsets((topicName, Partition partitionNumber), System.TimeSpan.FromMilliseconds(5000)).High.Value
 
                   let mutable x = 0
                   while true do
                         let! result = topic.Read ()
+                        let currentPosition = match match result.position with (topicName, partition, offset) -> offset with Offset(x) -> x | _ -> 0L
                         let position = 
                            match result.position with
                            | (_, _, Offset(x)) -> x
@@ -516,6 +529,9 @@ module Indexer =
                            match result.position with
                            | (_, _, Offset offset) -> index.Put {StringKey.Key = $"storedPosition-{partitionNumber}"} (Some offset)
                            | _ -> printfn "The offset has been set to an invalid value (probaly a sentinal)"
+                           if currentPosition >= endOfTopicPlusOne - 1L then
+                              lock _caughtUpLock (fun _ -> caughtUpFlags.[partitionNumber] <- true)
+
                            if x % 100 = 0 then 
                               printfn "partitionNumber = %A, stored: %A %A %A %A %A %A %A %A" partitionNumber x writeCounter getCounter rangeCounter writeBatchCounter reduceCounter testCounter result.key
                               printfn "stopwatches: global: %A merge: %A rocks: %A reduce: %A primary: %A secondary: %A rgkey: %A rrange: %A rfold: %A rwb: %A rramindex: %A testStopwatch: %A" 
@@ -538,7 +554,7 @@ module Indexer =
                   raise e
             } |> Async.Start
          )
-         observable
+         observable, isThisSourceNodeCaughtUp
 
    module HelperFunctions = 
       let sendInitialGetToSubscriber key1 key2 (comparer: Option<IKeyable<'Key> -> IKeyable<'Key> -> int>) (dict: IIndex<_,_>) (observer: Subject<Upsert<_, _> seq>) = 
