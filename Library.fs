@@ -914,11 +914,13 @@ module Indexer =
       observable
 
    let eventProjectionNode 
+      (wb: WriteBatch)
       (db: RocksDb)
-      (mappingFunction: 'NewValue option -> Upsert<'Key, 'Value> -> 'NewValue option)
-      (source: IObservable<Upsert<'Key, 'Value> seq * SourceNodePosition>)
-      : IObservable<seq<Upsert<'Key, 'Key * 'NewValue>> * SourceNodePosition> = 
-      let observable = Subject<Upsert<'Key, 'Key * 'NewValue> seq * SourceNodePosition>()
+      (rocksDbName: string)
+      (mappingFunction: 'NewValue option -> Upsert<IKeyable<'Key>, 'Value> -> 'NewValue option)
+      (source: IObservable<Upsert<IKeyable<'Key>, 'Value> seq * SourceNodePosition>)
+      : IObservable<seq<Upsert<IKeyable<'Key>, IKeyable<'Key> * 'NewValue>> * SourceNodePosition> = 
+      let observable = Subject<Upsert<IKeyable<'Key>, IKeyable<'Key> * 'NewValue> seq * SourceNodePosition>()
 
       let dictGet key (dict: Dictionary<_, _>) =
          try
@@ -926,8 +928,7 @@ module Indexer =
          with e ->
                None
 
-
-      let dict = Dictionary<'Key, 'NewValue>()
+      let index = RocksIndex<'Key, 'NewValue>(db, wb, rocksDbName) :> IIndex<_, _>
 
       source |> Observable.add (fun (upserts, position) ->
          try
@@ -935,11 +936,11 @@ module Indexer =
                upserts 
                |> Seq.map (fun i -> 
                   let key = i.Key
-                  let storedValue = dict |> dictGet key
+                  let storedValue = index.Get key
                   let projectedValue = i |> mappingFunction storedValue
                   match projectedValue with
-                  | Some(x) -> dict.[key] <- x
-                  | None -> dict.Remove(key) |> ignore
+                  | Some(x) -> index.Put key (Some(x))
+                  | None -> index.Put key None |> ignore
                   {Key = i.Key; Value = projectedValue |> Option.map (fun k -> (i.Key, k))})
                |> Seq.toList
             observable.Next (emits, position)
