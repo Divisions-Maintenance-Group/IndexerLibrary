@@ -912,6 +912,42 @@ module Indexer =
             raise e
       )
       observable
+
+   let eventProjectionNode 
+      (db: RocksDb)
+      (mappingFunction: 'NewValue option -> Upsert<'Key, 'Value> -> 'NewValue option)
+      (source: IObservable<Upsert<'Key, 'Value> seq * SourceNodePosition>)
+      : IObservable<seq<Upsert<'Key, 'Key * 'NewValue>> * SourceNodePosition> = 
+      let observable = Subject<Upsert<'Key, 'Key * 'NewValue> seq * SourceNodePosition>()
+
+      let dictGet key (dict: Dictionary<_, _>) =
+         try
+               Some(dict.[key])
+         with e ->
+               None
+
+
+      let dict = Dictionary<'Key, 'NewValue>()
+
+      source |> Observable.add (fun (upserts, position) ->
+         try
+            let emits = 
+               upserts 
+               |> Seq.map (fun i -> 
+                  let key = i.Key
+                  let storedValue = dict |> dictGet key
+                  let projectedValue = i |> mappingFunction storedValue
+                  match projectedValue with
+                  | Some(x) -> dict.[key] <- x
+                  | None -> dict.Remove(key) |> ignore
+                  {Key = i.Key; Value = projectedValue |> Option.map (fun k -> (i.Key, k))})
+               |> Seq.toList
+            observable.Next (emits, position)
+         with e ->
+            printfn "%A" e
+            raise e
+      )
+      observable
    
    let exportNode
       (wb: WriteBatch)
