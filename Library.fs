@@ -511,6 +511,12 @@ module Indexer =
                   let! topic = kafkaServerConnection.OpenReaderAsync(stateTopic, partitionNumber, ?startPosition = topicNamePartitionOffset)
                   let endOfTopicPlusOne = topic.QueryWatermarkOffsets((topicName, Partition partitionNumber), System.TimeSpan.FromMilliseconds(5000)).High.Value
 
+                  configedPosition 
+                  |> Option.defaultValue 0L 
+                  |> (fun cPos -> 
+                     if cPos >= endOfTopicPlusOne - 1L then
+                        lock _caughtUpLock (fun _ -> caughtUpFlags.[partitionNumber] <- true))
+
                   let mutable x = 0
                   while true do
                         let! result = topic.Read ()
