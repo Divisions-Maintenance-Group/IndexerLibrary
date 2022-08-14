@@ -108,7 +108,8 @@ module Indexer =
       let sync = obj()
       let mutable stopped = false
       let observers = System.Collections.Generic.List<IObserver<'T>>()
-      let iter f = observers |> Seq.iter f
+      let iter f = 
+         lock sync <| (fun () -> observers |> Seq.iter f)
       let onCompleted () =
          if not stopped then
             stopped <- true
@@ -131,7 +132,7 @@ module Indexer =
          member x.OnNext value = x.Next value
       interface IObservable<'T> with
          member this.Subscribe(observer:IObserver<'T>) =
-            observers.Add observer
+            lock sync <| (fun () -> observers.Add observer)
             { new IDisposable with
                member this.Dispose() =
                   lock sync <| remove observer
