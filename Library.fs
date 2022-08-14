@@ -919,44 +919,68 @@ module Indexer =
       )
       observable
 
-   type TimeHelper (currentKey: 'Key, futureDates: ref<Map<DateTime, 'Key>>) = 
+   type TimeHelper<'Key, 'Value> (currentKey: IKeyable<'Key>, value: ('Value * SourceNodePosition) option, futureDates: IIndex<CompoundKey<DateTime, 'Key>, 'Value * SourceNodePosition>) = 
       let currentTime = DateTime.UtcNow
 
       let isTimeInFuture (timestamp: DateTime) = 
          if timestamp > currentTime then
-            futureDates.Value <- futureDates.Value |> Map.add timestamp currentKey
+            futureDates.WriteBatchPut {Key1 = {DateKey.Key = timestamp}; Key2 = currentKey} value
             true
          else
             false
 
    type TimeNodePossibleMessages<'Key, 'Value> =
-      | ProcessFutureDates 
+      | ProcessFutureDates
       | ProcessSourceItem of (Upsert<IKeyable<'Key>, 'Value> seq * SourceNodePosition) 
+
+   let createTimer interval =
+      let timer = new Timers.Timer(interval)
+      timer.AutoReset <- true
+      timer.Enabled <- true
+      timer.Elapsed
 
    let timeNode
       (wb: WriteBatch)
-      (mappingFunction: 'Value option -> TimeHelper -> 'NewValue option )
+      (db: RocksDb)
+      (rocksFutureDatesName: string)
+      (minKey: IKeyable<'Key>)
+      (maxKey: IKeyable<'Key>)
+      (mappingFunction: 'Value option -> TimeHelper<'Key, 'Value> -> 'NewValue option )
       (source: IObservable<Upsert<IKeyable<'Key>, 'Value> seq * SourceNodePosition>)
       : IObservable<Upsert<IKeyable<'Key>, 'NewValue> seq * SourceNodePosition> =
 
+      let futureDates = (new RocksIndex<CompoundKey<DateTime, 'Key>, 'Value * SourceNodePosition>(db, wb, rocksFutureDatesName) :> IIndex<CompoundKey<DateTime, 'Key>, 'Value * SourceNodePosition>) 
+
       let observable = Subject<Upsert<IKeyable<'Key>, 'NewValue> seq * SourceNodePosition>()
-      let futureDates: ref<Map<DateTime, 'Key>> = ref(Map.empty)
 
       let processor = MailboxProcessor<TimeNodePossibleMessages<'Key, 'Value>>.Start(fun inbox ->
          let rec innerLoop () = async {
-            // This way you retrieve message from the mailbox queue
-            // or await them in case the queue empty.
-            // You can think of the `inbox` parameter as a reference to self.
             let! message = inbox.Receive()
-            // Now you can process the retrieved message.
             match message with
             | ProcessFutureDates ->
-               printfn "Hi! This is mailbox processor's inner loop!" 
+               let now = DateTime.UtcNow
+               let itemsToReprocess = 
+                  futureDates.Range {Key1 = {DateKey.Key = DateTime.MinValue}; Key2 = minKey} {Key1 = {DateKey.Key = now}; Key2 = maxKey} None
+               
+               let emits = 
+                  itemsToReprocess
+                  |> Seq.map (fun upsert -> {Key = upsert.Key.GetKey().Key2; Value = mappingFunction (match upsert.Value with Some(x) -> Some(fst x) | None -> None) (TimeHelper(upsert.Key.GetKey().Key2, upsert.Value, futureDates))})
+
+               let position = itemsToReprocess |> Seq.tryPick (fun i -> i.Value |> Option.map (fun i -> snd i)) 
+
+               observable.Next (emits, (match position with Some(x) -> x | None -> 0L))
+               
+
+               
+
+
+
+               printfn "Hi! This is mailbox processor's inner loop!"
             | ProcessSourceItem(upserts, position) ->
                try
                   let emits = 
                      upserts 
-                     |> Seq.map (fun upsert -> {Key = upsert.Key; Value = mappingFunction upsert.Value (TimeHelper(upsert.Key.GetKey(), futureDates))})
+                     |> Seq.map (fun upsert -> {Key = upsert.Key; Value = mappingFunction upsert.Value (TimeHelper(upsert.Key, (match upsert.Value with Some(x) -> Some(x, position) | None -> None), futureDates))})
                      |> Seq.toList
                   observable.Next (emits, position)
                with e ->
@@ -966,8 +990,10 @@ module Indexer =
          }
          innerLoop ())
 
-      source |> Observable.add (fun (deltas, position) ->
-         processor.Post (ProcessSourceItem(deltas, position))
+      createTimer 100 |> Event.add(fun event -> processor.Post ProcessFutureDates)
+
+      source |> Observable.add (fun (upserts, position) ->
+         processor.Post (ProcessSourceItem(upserts, position))
       )
       observable
 
