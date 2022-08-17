@@ -8,75 +8,63 @@ open System.Threading
 open System.Threading.Tasks
 open IndexerLibrary
 
-type internal KOffset = Confluent.Kafka.Offset
-type internal KPartition = Confluent.Kafka.Partition
-type internal KTopicPartition = Confluent.Kafka.TopicPartition
-type internal KWatermarkOffsets = Confluent.Kafka.WatermarkOffsets
-type internal KISerializer<'T> = Confluent.Kafka.ISerializer<'T>
-type internal KIDeserializer<'T> = Confluent.Kafka.IDeserializer<'T>
-type internal KSerializationContext = Confluent.Kafka.SerializationContext
-type internal KIConsumer<'K,'V> = Confluent.Kafka.IConsumer<'K,'V>
-type internal KConsumerBuilder<'K,'V> = Confluent.Kafka.ConsumerBuilder<'K,'V>
-type internal KConsumerConfig = Confluent.Kafka.ConsumerConfig
-type internal KIProducer<'K,'V> = Confluent.Kafka.IProducer<'K,'V>
-type internal KProducerBuilder<'K,'V> = Confluent.Kafka.ProducerBuilder<'K,'V>
-type internal KProducerConfig = Confluent.Kafka.ProducerConfig
-type internal KMessage<'K,'V> = Confluent.Kafka.Message<'K,'V>
+type KOffset = Confluent.Kafka.Offset
+type KPartition = Confluent.Kafka.Partition
+type KTopicPartition = Confluent.Kafka.TopicPartition
+type KWatermarkOffsets = Confluent.Kafka.WatermarkOffsets
+type KSerializationContext = Confluent.Kafka.SerializationContext
+type KIConsumer<'K,'V> = Confluent.Kafka.IConsumer<'K,'V>
+type KConsumerBuilder<'K,'V> = Confluent.Kafka.ConsumerBuilder<'K,'V>
+type KConsumerConfig = Confluent.Kafka.ConsumerConfig
+type KIProducer<'K,'V> = Confluent.Kafka.IProducer<'K,'V>
+type KProducerBuilder<'K,'V> = Confluent.Kafka.ProducerBuilder<'K,'V>
+type KProducerConfig = Confluent.Kafka.ProducerConfig
+type KMessage<'K,'V> = Confluent.Kafka.Message<'K,'V>
+
+type KISerializer<'T> = Confluent.Kafka.ISerializer<'T>
+type Serializer<'T>(serialize: 'T -> byte array) =
+    interface Confluent.Kafka.ISerializer<'T> with
+        override this.Serialize(data,ctx) = serialize data
+
+type KIDeserializer<'T> = Confluent.Kafka.IDeserializer<'T>
+type Deserializer<'T>(deserialize: byte array -> bool -> 'T) = 
+    interface Confluent.Kafka.IDeserializer<'T> with
+        override this.Deserialize(data,isNull,ctx) = deserialize (data.ToArray()) isNull
 
 module Serialize =
-    open Google.Protobuf
+    open FsGrpc
     open System.Reflection
 
-    let guidS = { new KISerializer<UUID> with
-        override _.Serialize (data, ctx) =
-            data.GetBytes
-    }
-    let guidD = { new KIDeserializer<UUID> with
-        override _.Deserialize (data, isNull, ctx) =
-            match UUID.New (data.ToArray()) with
+    let guidS = new Serializer<UUID>(fun d -> d.GetBytes)
+    let guidD = new Deserializer<UUID> (fun d _ -> 
+            match UUID.New (d) with
             | Ok u -> u
-            | Error e -> raise (Exception(e))
-    }
+            | Error e -> raise (Exception(e)))
     let guid = guidS, guidD
 
-    let messageS<'T when 'T :> IMessage> = { new KISerializer<'T> with
-        override _.Serialize (data,ctx) =
-            data.ToByteArray ()
-    }
+    let inline messageS<'T when 'T: (static member Proto : Lazy<FsGrpc.Protobuf.ProtoDef<'T>>) and 'T: equality> = 
+        new Serializer<'T>(FsGrpc.Protobuf.encode)
 
-    let messageD< 'T when 'T :> IMessage> =
-        {
-            new KIDeserializer<'T> with
-                override _.Deserialize (data, isNull, ctx) =
-                    // Modules with the same name as a type in the same file get mangled by appending
-                    // "Module" - i.e. Foo -> FooModule
-                    let tType = typeof<'T>
-                    let tModule =
-                        tType.Assembly.GetType(tType.FullName + "Module")
-                    let msg : 'T =
-                        tModule
-                            .GetMethod("empty", BindingFlags.Public ||| BindingFlags.Static)
-                            .Invoke(null, [||]) :?> 'T
-                    msg.MergeFrom data
-                    msg
-        }
+    let inline messageD<'T when 'T: (static member Proto : Lazy<FsGrpc.Protobuf.ProtoDef<'T>>) and 'T: equality> = 
+        new Deserializer<'T>(fun d _ -> FsGrpc.Protobuf.decode d)
 
-    let message< 'T when 'T :> IMessage> = messageS<'T>, messageD<'T>
+    let inline message<'T when 'T: (static member Proto : Lazy<FsGrpc.Protobuf.ProtoDef<'T>>) and 'T: equality> = 
+        messageS<'T>, messageD<'T>
 
-    let optionalMessageS<'T when 'T :> IMessage> = { new KISerializer<'T option> with
-        override _.Serialize (dataOpt, ctx) =
+    let inline optionalMessageS<'T when 'T: (static member Proto : Lazy<FsGrpc.Protobuf.ProtoDef<'T>>) and 'T: equality> = 
+        new Serializer<'T option>(fun dataOpt ->
             match dataOpt with
-            | Some data -> messageS.Serialize (data, ctx)
-            | None -> null
-    }
+            | Some data -> FsGrpc.Protobuf.encode data
+            | None -> null)
+    
 
-    let optionalMessageD<'T when 'T :> IMessage> = { new KIDeserializer<'T option> with
-        override _.Deserialize (data, isNull, ctx) =
+    let inline optionalMessageD<'T when 'T: (static member Proto : Lazy<FsGrpc.Protobuf.ProtoDef<'T>>) and 'T: equality> = 
+        new Deserializer<'T option>(fun d isNull ->
             if isNull then None
-            else Some (messageD.Deserialize (data, isNull, ctx))
-    }
+            else Some (FsGrpc.Protobuf.decode d))
 
-    let optionalMessage<'T when 'T :> IMessage> = optionalMessageS<'T>, optionalMessageD<'T>
+    let inline optionalMessage<'T when 'T: (static member Proto : Lazy<FsGrpc.Protobuf.ProtoDef<'T>>) and 'T: equality> = 
+        optionalMessageS<'T>, optionalMessageD<'T>
 
 type TopicName = string
 type Partition = | Any | Partition of int
@@ -140,34 +128,37 @@ type TopicKind = | EventTopic | StateTopic
 type TopicDefinition<'Key, 'Value> = {
     kind: TopicKind
     name: string
-    keySerializer: (KISerializer<'Key> * KIDeserializer<'Key>)
-    valueSerializer: (KISerializer<'Value> * KIDeserializer<'Value>)
+    keySerializer: (Confluent.Kafka.ISerializer<'Key> * Confluent.Kafka.IDeserializer<'Key>)
+    valueSerializer: (Confluent.Kafka.ISerializer<'Value> * Confluent.Kafka.IDeserializer<'Value>)
 }
 
 open Google.Protobuf
 
 [<Sealed; AbstractClass>]
-type TopicDefinition =
-    static member Create<'Value when 'Value :> IMessage<'Value>> (name, kind) : TopicDefinition<UUID, 'Value> = {
+module TopicDefinition =
+    let inline Create<'Value 
+                        when 'Value: (static member Proto : Lazy<FsGrpc.Protobuf.ProtoDef<'Value>>)
+                        and 'Value: equality> (name, kind) : TopicDefinition<UUID, 'Value> = {
         kind = kind
         name = name
-        keySerializer = Serialize.guid
-        valueSerializer = Serialize.message<'Value>
+        keySerializer = Serialize.guid |> fun (s,d) -> (s:> Confluent.Kafka.ISerializer<UUID>, d:> Confluent.Kafka.IDeserializer<UUID>)
+        valueSerializer = (Serialize.messageS, Serialize.messageD)
     }
-    static member CreateOptional<'Value when 'Value :> IMessage<'Value>> (name, kind) : TopicDefinition<UUID, 'Value option> = {
+    let inline CreateOptional<'Value 
+                        when 'Value: (static member Proto : Lazy<FsGrpc.Protobuf.ProtoDef<'Value>>)
+                        and 'Value: equality> (name, kind) : TopicDefinition<UUID, 'Value option> = {
         kind = kind
         name = name
-        keySerializer = Serialize.guid
-        valueSerializer = Serialize.optionalMessage<'Value>
+        keySerializer = Serialize.guid |> fun (s,d) -> (s:> Confluent.Kafka.ISerializer<UUID>, d:> Confluent.Kafka.IDeserializer<UUID>)
+        valueSerializer = (Serialize.optionalMessageS, Serialize.optionalMessageD)
     }
-    static member Create<'Value> (name, kind, valueSerializer) : TopicDefinition<UUID, 'Value> = {
+    let CreateWithSerializer<'Value> (name, kind, valueSerializer) : TopicDefinition<UUID, 'Value> = {
         kind = kind
         name = name
-        keySerializer = Serialize.guid
+        keySerializer = Serialize.guid |> fun (s,d) -> (s:> Confluent.Kafka.ISerializer<UUID>, d:> Confluent.Kafka.IDeserializer<UUID>)
         valueSerializer = valueSerializer
     }
 
-module TopicDefinition =
     let toTopicSpecification nAvailableBrokers topicDef =
         let replicationFactor = min 3s nAvailableBrokers
         let minInsyncReplicas = (replicationFactor / 2s) + 1s
@@ -191,7 +182,7 @@ type ITopicServerConnection =
     abstract member OpenReaderAsync : topicDef:TopicDefinition<'Key, 'Value> * partition:int * ?startOffset: (TopicName * Partition * Offset) -> Async<ITopicReader<'Key, 'Value>>
     abstract member OpenWriterAsync : topicDef:TopicDefinition<'Key, 'Value> * ?missingTopicBehavior:MissingTopicBehavior -> Async<ITopicWriter<'Key, 'Value>>
 
-type internal TopicData<'Key, 'Value>(serializeKey: (KISerializer<'Key> * KIDeserializer<'Key>), serializeValue: (KISerializer<'Value> * KIDeserializer<'Value>)) =
+type TopicData<'Key, 'Value>(serializeKey: (KISerializer<'Key> * KIDeserializer<'Key>), serializeValue: (KISerializer<'Value> * KIDeserializer<'Value>)) =
     //let mutable data = ImmutableList.Create<byte[]*byte[]>()
     let mutable dataLock = new Object()
     let data = List<byte[] option * byte[] option>()
@@ -226,7 +217,7 @@ type internal TopicData<'Key, 'Value>(serializeKey: (KISerializer<'Key> * KIDese
             Some (key, value)
         )
 
-type internal InMemoryTopicWriter<'Key, 'Value>(getData, topicDef: TopicDefinition<'Key, 'Value>) =
+type InMemoryTopicWriter<'Key, 'Value>(getData, topicDef: TopicDefinition<'Key, 'Value>) =
     let (topicData: TopicData<'Key, 'Value>) = getData topicDef
 
     member _.Write (key: 'Key, value: 'Value) = async {
@@ -242,7 +233,7 @@ type internal InMemoryTopicWriter<'Key, 'Value>(getData, topicDef: TopicDefiniti
         }
         override this.Dispose () = this.Dispose ()
 
-type internal InMemoryTopicReader<'Key, 'Value>(getData, topicDef: TopicDefinition<'Key, 'Value>, ?startPosition) =
+type InMemoryTopicReader<'Key, 'Value>(getData, topicDef: TopicDefinition<'Key, 'Value>, ?startPosition) =
     let (topicData : TopicData<'Key, 'Value>) = getData topicDef
     let mutable headIndex =
         match startPosition with
@@ -291,7 +282,7 @@ type internal InMemoryTopicReader<'Key, 'Value>(getData, topicDef: TopicDefiniti
         override this.Read () = async {
             let! ct = Async.CancellationToken
             let! (k,v,hi) = Async.AwaitTask (this.Read ct)
-            return { key = k; value = v; position = (topicDef.name, Partition 0, Offset hi) }
+            return ({ key = k; value = v; position = (topicDef.name, Partition 0, Offset hi) }: TopicResult<'Key,'Value>)
         }
         override this.Dispose () = this.Dispose ()
         override _.QueryWatermarkOffsets (_, _) = KWatermarkOffsets(KOffset 0, KOffset topicData.Count)
@@ -304,7 +295,7 @@ type InMemoryTopicServerConnection(bootstrapServers) =
 
     new() = InMemoryTopicServerConnection("")
     
-    member internal _.GetData (topicDef: TopicDefinition<'Key, 'Value>) : TopicData<'Key, 'Value> =
+    member _.GetData (topicDef: TopicDefinition<'Key, 'Value>) : TopicData<'Key, 'Value> =
         topics.GetOrAdd (topicDef.name, (fun key -> new TopicData<'Key, 'Value>(topicDef.keySerializer, topicDef.valueSerializer) :> obj)) :?> TopicData<'Key, 'Value>
 
     member this.OpenReaderAsync<'Key, 'Value> (topicDef, ?startPosition) = async {
@@ -448,7 +439,7 @@ type KafkaTopicReader<'Key,'Value>(topicName: string, consumer: KIConsumer<'Key,
         return reader
     }
 
-    member internal _.ReadLoop () = async {
+    member _.ReadLoop () = async {
         isRunning <- true
         try
             while true do

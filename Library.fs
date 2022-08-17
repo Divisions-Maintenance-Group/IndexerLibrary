@@ -83,6 +83,7 @@ module Kafka =
 
 
 module Indexer = 
+   open FsGrpc.Protobuf
    type Upsert<'Key, 'Value> = {
       Key: 'Key
       Value: Option<'Value>
@@ -475,7 +476,9 @@ module Indexer =
    type SourceNodePosition = string * int * int64
 
    // hostAndPort should look something like kafka:9093 or localhost:9092 or something like that
-   let sourceNode 
+   let inline sourceNode<'Value 
+                           when 'Value: (static member Proto : Lazy<FsGrpc.Protobuf.ProtoDef<'Value>>)
+                           and 'Value: equality>
       (wb: WriteBatch)
       (db: RocksDb) 
       (rocksDbName) 
@@ -499,7 +502,7 @@ module Indexer =
          let isThisSourceNodeCaughtUp () = 
             lock _caughtUpLock (fun _ -> caughtUpFlags |> Seq.forall (fun i -> i.Value))
 
-         let index = (new RocksIndex<string, int64>(db, wb, rocksDbName) :> IIndex<string, int64>) 
+         let index: IIndex<string, int64> = new RocksIndex<string, int64>(db, wb, rocksDbName)
          let observable = Subject<Upsert<IKeyable<UUID>, 'Value> seq * SourceNodePosition>()
 
          partitionNumbers |> Seq.iter (fun partitionNumber -> 
@@ -957,17 +960,20 @@ module Indexer =
       )
       observable
    
-   let exportNode
+   let inline exportNode<'Envelope,'Value 
+                           when 'Envelope: (static member Proto : Lazy<FsGrpc.Protobuf.ProtoDef<'Envelope>>) 
+                           and 'Envelope: equality
+                           and 'Value: (static member Proto : Lazy<FsGrpc.Protobuf.ProtoDef<'Value>>)
+                           and 'Value: equality>
       (wb: WriteBatch)
       (db: RocksDb)
       (kafkaBootstrapServers)
-      (outputTopicName)
-      (messageParser: Google.Protobuf.MessageParser<'Envelope> when 'Envelope :> Google.Protobuf.IMessage) /// something like Dmg.Providers.V1.ProviderOrg.Parser
+      (outputTopicName)// som
       (indexName: string)
       (positionDictName: string)
-      (createEnvelope: SourceNodePosition -> 'Value option -> 'Envelope option when 'Envelope :> Google.Protobuf.IMessage and 'Value :> Google.Protobuf.IMessage)
-      (pullPositionAndValueFromEnvelope: 'Envelope -> SourceNodePosition * 'Value when 'Envelope :> Google.Protobuf.IMessage and 'Value :> Google.Protobuf.IMessage)
-      (source: IObservable<Delta<IKeyable<UUID>, 'Value> seq * SourceNodePosition> when 'Value :> Google.Protobuf.IMessage)
+      (createEnvelope: SourceNodePosition -> 'Value option -> 'Envelope option)
+      (pullPositionAndValueFromEnvelope: 'Envelope -> SourceNodePosition * 'Value)
+      (source: IObservable<Delta<IKeyable<UUID>, 'Value> seq * SourceNodePosition>)
       : unit = 
       let outputTopic = Kafka.Kafka($"{kafkaBootstrapServers}", outputTopicName)
       let mutable okToProcess = false
@@ -982,7 +988,7 @@ module Indexer =
                   if data |> Option.ofObj |> Option.defaultValue (Array.empty) |> Array.isEmpty then
                      index.Put {UUIDKey.Key = uuid} (Some (None, None)) 
                   else
-                     let (id, partition, position), value = messageParser.ParseFrom(data) |> pullPositionAndValueFromEnvelope
+                     let (id, partition, position), value = FsGrpc.Protobuf.decode data |> pullPositionAndValueFromEnvelope
                      positionDict.Put {StringKey.Key = $"#{id}: #{partition}"} (Some(position, -1L))
                      index.Put {UUIDKey.Key = uuid} (Some (Some value, None))
             )
@@ -1031,7 +1037,7 @@ module Indexer =
                      |Some(v, p) -> Some(p)
                   if lvalue <> rvalue then
                      async {
-                        let optionalBytes = (createEnvelope (rvaluePos |> Option.defaultValue ("", 0 ,0L)) rvalue) |> Option.map Google.Protobuf.MessageExtensions.ToByteArray
+                        let optionalBytes = (createEnvelope (rvaluePos |> Option.defaultValue ("", 0 ,0L)) rvalue) |> Option.map encode
                         let! outputTopicWrittenOffset = outputTopic.writeLineToStream(i.Key.GetKey(), optionalBytes |> Option.defaultValue null)
                         ()
                      } |> Async.Start
