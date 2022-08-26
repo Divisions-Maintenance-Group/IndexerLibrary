@@ -971,15 +971,15 @@ module Indexer =
       (outputTopicName)// som
       (indexName: string)
       (positionDictName: string)
-      (createEnvelope: SourceNodePosition -> 'Value option -> 'Envelope option)
-      (pullPositionAndValueFromEnvelope: 'Envelope -> SourceNodePosition * 'Value)
-      (source: IObservable<Delta<IKeyable<UUID>, 'Value> seq * SourceNodePosition>)
+      (createEnvelope: SourceNodePosition list -> 'Value option -> 'Envelope option when 'Envelope :> Google.Protobuf.IMessage and 'Value :> Google.Protobuf.IMessage)
+      (pullPositionAndValueFromEnvelope: 'Envelope -> SourceNodePosition list * 'Value when 'Envelope :> Google.Protobuf.IMessage and 'Value :> Google.Protobuf.IMessage)
+      (source: IObservable<Delta<IKeyable<UUID>, 'Value> seq * SourceNodePosition> when 'Value :> Google.Protobuf.IMessage)
       : unit = 
       let outputTopic = Kafka.Kafka($"{kafkaBootstrapServers}", outputTopicName)
       let mutable okToProcess = false
 
-      let index = (new RocksIndex<UUID, 'Value option * ('Value * SourceNodePosition) option>(db, wb, indexName) :> IIndex<UUID, 'Value option * ('Value * SourceNodePosition) option>) 
-      let positionDict = (new RocksIndex<string, int64 * int64>(db, wb, positionDictName) :> IIndex<string, int64 * int64>) 
+      let index = (new RocksIndex<UUID, 'Value option * 'Value option>(db, wb, indexName) :> IIndex<UUID, 'Value option * 'Value option>) 
+      let positionDict = (new RocksIndex<CompoundKey<string, int>, int64 * int64>(db, wb, positionDictName) :> IIndex<CompoundKey<string, int>, int64 * int64>) 
 
       async {
          outputTopic.readWholeStream
@@ -988,8 +988,10 @@ module Indexer =
                   if data |> Option.ofObj |> Option.defaultValue (Array.empty) |> Array.isEmpty then
                      index.Put {UUIDKey.Key = uuid} (Some (None, None)) 
                   else
-                     let (id, partition, position), value = FsGrpc.Protobuf.decode data |> pullPositionAndValueFromEnvelope
-                     positionDict.Put {StringKey.Key = $"#{id}: #{partition}"} (Some(position, -1L))
+                     let positions, value = messageParser.ParseFrom(data) |> pullPositionAndValueFromEnvelope
+                     positions |> Seq.iter (fun i -> 
+                        let (id, partition, position) = i
+                        positionDict.Put {Key1 = {StringKey.Key = id}; Key2 = {IntKey.Key = partition}} (Some(position, -1L)))
                      index.Put {UUIDKey.Key = uuid} (Some (Some value, None))
             )
          okToProcess <- true
@@ -1007,21 +1009,20 @@ module Indexer =
                   delta.Key 
                   (
                      match storedValues with
-                     | None -> Some (None, delta.NextValue |> Option.map (fun i -> (i, position)))
-                     | Some(x) -> Some(fst x, delta.NextValue |> Option.map (fun i -> (i, position)))
+                     | None -> Some (None, delta.NextValue |> Option.map (fun i -> i))
+                     | Some(x) -> Some(fst x, delta.NextValue |> Option.map (fun i -> i))
                   )
                let id, partition, position = position
-               let f = positionDict.Get {StringKey.Key = $"#{id}: #{partition}"}
+               let f = positionDict.Get {Key1 = {StringKey.Key = id}; Key2 = {IntKey.Key = partition}}
                match f with
                | None ->
-                  positionDict.Put {StringKey.Key = $"#{id}: #{partition}"} (Some(-1L, position))
+                  positionDict.Put {Key1 = {StringKey.Key = id}; Key2 = {IntKey.Key = partition}} (Some(-1L, position))
                | Some((lpos, rpos)) -> 
-                  positionDict.Put {StringKey.Key = $"#{id}: #{partition}"} (Some(lpos, position))
+                  positionDict.Put {Key1 = {StringKey.Key = id}; Key2 = {IntKey.Key = partition}} (Some(lpos, position))
             )
 
-            let (allPositions, iter) = positionDict.GetAllAsSequence()
-            use iter = iter
-            if allPositions |> Seq.forall(fun kvp -> fst kvp.Value.Value <= snd kvp.Value.Value) then
+            let allPositions = positionDict.GetAll()
+            if (not (allPositions |> Seq.isEmpty)) && allPositions |> Seq.forall(fun kvp -> fst kvp.Value.Value <= snd kvp.Value.Value) then
                let (allIndexes, indexIter) = index.GetAllAsSequence()
                use indexIter = indexIter
                allIndexes 
@@ -1030,17 +1031,19 @@ module Indexer =
                   let rvalue = 
                      match rvalueWPosition with
                      | None -> None
-                     | Some(v, p) -> Some(v)
-                  let rvaluePos = 
-                     match rvalueWPosition with
-                     |None -> None
-                     |Some(v, p) -> Some(p)
+                     | Some(v) -> Some(v)
                   if lvalue <> rvalue then
                      async {
-                        let optionalBytes = (createEnvelope (rvaluePos |> Option.defaultValue ("", 0 ,0L)) rvalue) |> Option.map encode
+                        let optionalBytes = 
+                           (createEnvelope 
+                              (allPositions 
+                                 |> Seq.map (fun i -> (i.Key.GetKey().Key1.GetKey(), i.Key.GetKey().Key2.GetKey(), snd i.Value.Value))
+                                 |> Seq.toList)
+                              rvalue) 
+                           |> Option.map Google.Protobuf.MessageExtensions.ToByteArray
                         let! outputTopicWrittenOffset = outputTopic.writeLineToStream(i.Key.GetKey(), optionalBytes |> Option.defaultValue null)
                         ()
-                     } |> Async.Start
+                     } |> Async.StartImmediate
                      index.Put i.Key None
                   else
                      index.Put i.Key None
