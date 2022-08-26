@@ -971,9 +971,9 @@ module Indexer =
       (outputTopicName)// som
       (indexName: string)
       (positionDictName: string)
-      (createEnvelope: SourceNodePosition list -> 'Value option -> 'Envelope option when 'Envelope :> Google.Protobuf.IMessage and 'Value :> Google.Protobuf.IMessage)
-      (pullPositionAndValueFromEnvelope: 'Envelope -> SourceNodePosition list * 'Value when 'Envelope :> Google.Protobuf.IMessage and 'Value :> Google.Protobuf.IMessage)
-      (source: IObservable<Delta<IKeyable<UUID>, 'Value> seq * SourceNodePosition> when 'Value :> Google.Protobuf.IMessage)
+      (createEnvelope: SourceNodePosition list -> 'Value option -> 'Envelope option)
+      (pullPositionAndValueFromEnvelope: 'Envelope -> SourceNodePosition list * 'Value)
+      (source: IObservable<Delta<IKeyable<UUID>, 'Value> seq * SourceNodePosition>)
       : unit = 
       let outputTopic = Kafka.Kafka($"{kafkaBootstrapServers}", outputTopicName)
       let mutable okToProcess = false
@@ -988,7 +988,7 @@ module Indexer =
                   if data |> Option.ofObj |> Option.defaultValue (Array.empty) |> Array.isEmpty then
                      index.Put {UUIDKey.Key = uuid} (Some (None, None)) 
                   else
-                     let positions, value = messageParser.ParseFrom(data) |> pullPositionAndValueFromEnvelope
+                     let positions, value = decode data |> pullPositionAndValueFromEnvelope
                      positions |> Seq.iter (fun i -> 
                         let (id, partition, position) = i
                         positionDict.Put {Key1 = {StringKey.Key = id}; Key2 = {IntKey.Key = partition}} (Some(position, -1L)))
@@ -1040,7 +1040,7 @@ module Indexer =
                                  |> Seq.map (fun i -> (i.Key.GetKey().Key1.GetKey(), i.Key.GetKey().Key2.GetKey(), snd i.Value.Value))
                                  |> Seq.toList)
                               rvalue) 
-                           |> Option.map Google.Protobuf.MessageExtensions.ToByteArray
+                           |> Option.map encode
                         let! outputTopicWrittenOffset = outputTopic.writeLineToStream(i.Key.GetKey(), optionalBytes |> Option.defaultValue null)
                         ()
                      } |> Async.StartImmediate
