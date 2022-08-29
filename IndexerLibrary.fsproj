@@ -8,7 +8,6 @@
   </PropertyGroup>
 
   <ItemGroup>
-    <Compile Include="ProtobufConverter.fs" />
     <Compile Include="PicklerExtensions.fs" />
     <Compile Include="UUID.fs" />
     <Compile Include="Topic.fs" />
