@@ -920,12 +920,24 @@ module Indexer =
       )
       observable
 
-   type TimeHelper<'Key, 'Value> (currentKey: IKeyable<'Key>, value: ('Value * SourceNodePosition) option, futureDates: IIndex<CompoundKey<DateTime, 'Key>, 'Value * SourceNodePosition>) = 
+   type TimeHelper<'Key, 'Value> 
+      (
+         currentKey: IKeyable<'Key>, 
+         value: ('Value * SourceNodePosition) option, 
+         futureDates: IIndex<CompoundKey<DateTime, 'Key>, 'Value * SourceNodePosition>,
+         futureDatesByOriginalKey: IIndex<'Key, CompoundKey<DateTime, 'Key>>
+      ) = 
       let currentTime = DateTime.UtcNow
 
       let isTimeInFuture (timestamp: DateTime) = 
          if timestamp > currentTime then
+            match futureDatesByOriginalKey.Get currentKey with
+            | None -> ()
+            | Some(x) -> 
+               futureDates.WriteBatchPut x None
+               futureDatesByOriginalKey.WriteBatchPut currentKey None
             futureDates.WriteBatchPut {Key1 = {DateKey.Key = timestamp}; Key2 = currentKey} value
+            futureDatesByOriginalKey.WriteBatchPut currentKey (Some {Key1 = {DateKey.Key = timestamp}; Key2 = currentKey})
             true
          else
             false
@@ -951,6 +963,8 @@ module Indexer =
       : IObservable<Upsert<IKeyable<'Key>, 'NewValue> seq * SourceNodePosition> =
 
       let futureDates = (new RocksIndex<CompoundKey<DateTime, 'Key>, 'Value * SourceNodePosition>(db, wb, rocksFutureDatesName) :> IIndex<CompoundKey<DateTime, 'Key>, 'Value * SourceNodePosition>) 
+      /// TODO change future dates by original key into a sequence and handle accoordingly
+      let futureDatesByOriginalKey = (new RocksIndex<'Key, CompoundKey<DateTime, 'Key>>(db, wb, rocksFutureDatesName) :> IIndex<'Key, CompoundKey<DateTime, 'Key>>) 
 
       let observable = Subject<Upsert<IKeyable<'Key>, 'NewValue> seq * SourceNodePosition>()
 
@@ -963,25 +977,34 @@ module Indexer =
                let itemsToReprocess = 
                   futureDates.Range {Key1 = {DateKey.Key = DateTime.MinValue}; Key2 = minKey} {Key1 = {DateKey.Key = now}; Key2 = maxKey} None
                
-               let emits = 
-                  itemsToReprocess
-                  |> Seq.map (fun upsert -> {Key = upsert.Key.GetKey().Key2; Value = mappingFunction (match upsert.Value with Some(x) -> Some(fst x) | None -> None) (TimeHelper(upsert.Key.GetKey().Key2, upsert.Value, futureDates))})
-
-               let position = itemsToReprocess |> Seq.tryPick (fun i -> i.Value |> Option.map (fun i -> snd i)) 
-
-               observable.Next (emits, (match position with Some(x) -> x | None -> 0L))
-               
-
-               
-
-
-
-               printfn "Hi! This is mailbox processor's inner loop!"
+               itemsToReprocess
+               |> Seq.iter (fun upsert -> 
+                  match upsert.Value with
+                  | None -> ()
+                  | Some (value, position) ->
+                     let emit = 
+                        {
+                           Key = upsert.Key.GetKey().Key2
+                           Value = 
+                              mappingFunction 
+                                 (Some value) 
+                                 (TimeHelper(upsert.Key.GetKey().Key2, upsert.Value, futureDates, futureDatesByOriginalKey))
+                        }
+                     observable.Next (seq {emit}, position)
+                  futureDates.Put upsert.Key None
+                  futureDatesByOriginalKey.Put (upsert.Key.GetKey().Key2) None)
             | ProcessSourceItem(upserts, position) ->
                try
                   let emits = 
                      upserts 
-                     |> Seq.map (fun upsert -> {Key = upsert.Key; Value = mappingFunction upsert.Value (TimeHelper(upsert.Key, (match upsert.Value with Some(x) -> Some(x, position) | None -> None), futureDates))})
+                     |> Seq.map (fun upsert -> 
+                        {
+                           Key = upsert.Key 
+                           Value = 
+                              mappingFunction 
+                                 upsert.Value 
+                                 (TimeHelper(upsert.Key, (match upsert.Value with Some(x) -> Some(x, position) | None -> None), futureDates, futureDatesByOriginalKey))
+                        })
                      |> Seq.toList
                   observable.Next (emits, position)
                with e ->
