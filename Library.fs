@@ -1084,6 +1084,8 @@ module Indexer =
                fun uuid data offset -> 
                   if data |> Option.ofObj |> Option.defaultValue (Array.empty) |> Array.isEmpty then
                      index.Put {UUIDKey.Key = uuid} (Some (None, None)) 
+                  elif data.Length = 0 then
+                     index.Put {UUIDKey.Key = uuid} (Some (None, None)) 
                   else
                      let positions, value = messageParser.ParseFrom(data) |> pullPositionAndValueFromEnvelope
                      positions |> Seq.iter (fun i -> 
