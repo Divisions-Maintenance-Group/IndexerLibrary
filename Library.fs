@@ -923,21 +923,16 @@ module Indexer =
    type TimeHelper<'Key, 'Value> 
       (
          currentKey: IKeyable<'Key>, 
-         value: ('Value * SourceNodePosition) option, 
-         futureDates: IIndex<CompoundKey<DateTime, 'Key>, 'Value * SourceNodePosition>,
-         futureDatesByOriginalKey: IIndex<'Key, CompoundKey<DateTime, 'Key>>
+         value: ('Value * (string * int)) option, 
+         futureDates: IIndex<CompoundKey<DateTime, 'Key>, 'Value * (string * int)>,
+         originalCall: bool
       ) = 
       let currentTime = DateTime.UtcNow
 
       let isTimeInFuture (timestamp: DateTime) = 
          if timestamp > currentTime then
-            match futureDatesByOriginalKey.Get currentKey with
-            | None -> ()
-            | Some(x) -> 
-               futureDates.WriteBatchPut x None
-               futureDatesByOriginalKey.WriteBatchPut currentKey None
-            futureDates.WriteBatchPut {Key1 = {DateKey.Key = timestamp}; Key2 = currentKey} value
-            futureDatesByOriginalKey.WriteBatchPut currentKey (Some {Key1 = {DateKey.Key = timestamp}; Key2 = currentKey})
+            if originalCall then
+               futureDates.WriteBatchPut {Key1 = {DateKey.Key = timestamp}; Key2 = currentKey} value
             true
          else
             false
@@ -962,9 +957,8 @@ module Indexer =
       (source: IObservable<Upsert<IKeyable<'Key>, 'Value> seq * SourceNodePosition>)
       : IObservable<Upsert<IKeyable<'Key>, 'NewValue> seq * SourceNodePosition> =
 
-      let futureDates = (new RocksIndex<CompoundKey<DateTime, 'Key>, 'Value * SourceNodePosition>(db, wb, rocksFutureDatesName) :> IIndex<CompoundKey<DateTime, 'Key>, 'Value * SourceNodePosition>) 
-      /// TODO change future dates by original key into a sequence and handle accoordingly
-      let futureDatesByOriginalKey = (new RocksIndex<'Key, CompoundKey<DateTime, 'Key>>(db, wb, rocksFutureDatesName) :> IIndex<'Key, CompoundKey<DateTime, 'Key>>) 
+      let futureDates = (new RocksIndex<CompoundKey<DateTime, 'Key>, 'Value * (string * int)>(db, wb, rocksFutureDatesName) :> IIndex<CompoundKey<DateTime, 'Key>, 'Value * (string * int)>) 
+      let positions = (new RocksIndex<int, Map<string * int, int64>>(db, wb, rocksFutureDatesName) :> IIndex<int, Map<string * int, int64>>) 
 
       let observable = Subject<Upsert<IKeyable<'Key>, 'NewValue> seq * SourceNodePosition>()
 
@@ -972,6 +966,28 @@ module Indexer =
          let rec innerLoop () = async {
             let! message = inbox.Receive()
             match message with
+            | ProcessSourceItem(upserts, position) ->
+               try
+                  let sourceNodeUniqueIdentifier, partition, offset = position
+                  let emits = 
+                     upserts 
+                     |> Seq.map (fun upsert -> 
+                        {
+                           Key = upsert.Key 
+                           Value = 
+                              mappingFunction 
+                                 upsert.Value 
+                                 (TimeHelper(upsert.Key, (match upsert.Value with Some(x) -> Some(x, (sourceNodeUniqueIdentifier, partition)) | None -> None), futureDates, true))
+                        })
+                     |> Seq.toList
+                  let positionMap = 
+                     positions.Get {IntKey.Key = 1} |> Option.defaultValue Map.empty
+                     |> Map.add (sourceNodeUniqueIdentifier, partition) offset
+                  positions.Put {IntKey.Key = 1} (Some positionMap)
+                  observable.Next (emits, position)
+               with e ->
+                  printfn "%A" e
+                  raise e
             | ProcessFutureDates ->
                let now = DateTime.UtcNow
                let itemsToReprocess = 
@@ -981,35 +997,18 @@ module Indexer =
                |> Seq.iter (fun upsert -> 
                   match upsert.Value with
                   | None -> ()
-                  | Some (value, position) ->
+                  | Some (value, (sourceNodeUniqueIdentifier, partition)) ->
                      let emit = 
                         {
                            Key = upsert.Key.GetKey().Key2
                            Value = 
                               mappingFunction 
                                  (Some value) 
-                                 (TimeHelper(upsert.Key.GetKey().Key2, upsert.Value, futureDates, futureDatesByOriginalKey))
+                                 (TimeHelper(upsert.Key.GetKey().Key2, upsert.Value, futureDates, false))
                         }
-                     observable.Next (seq {emit}, position)
-                  futureDates.Put upsert.Key None
-                  futureDatesByOriginalKey.Put (upsert.Key.GetKey().Key2) None)
-            | ProcessSourceItem(upserts, position) ->
-               try
-                  let emits = 
-                     upserts 
-                     |> Seq.map (fun upsert -> 
-                        {
-                           Key = upsert.Key 
-                           Value = 
-                              mappingFunction 
-                                 upsert.Value 
-                                 (TimeHelper(upsert.Key, (match upsert.Value with Some(x) -> Some(x, position) | None -> None), futureDates, futureDatesByOriginalKey))
-                        })
-                     |> Seq.toList
-                  observable.Next (emits, position)
-               with e ->
-                  printfn "%A" e
-                  raise e
+                     let offset = ((positions.Get {IntKey.Key = 1}).Value.TryFind (sourceNodeUniqueIdentifier, partition)).Value
+                     observable.Next (seq {emit}, (sourceNodeUniqueIdentifier, partition, offset))
+                  futureDates.Put upsert.Key None)
             return! innerLoop()
          }
          innerLoop ())
