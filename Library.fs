@@ -929,7 +929,7 @@ module Indexer =
       ) = 
       let currentTime = DateTime.UtcNow
 
-      let isTimeInFuture (timestamp: DateTime) = 
+      member this.isTimeInFuture (timestamp: DateTime) = 
          if timestamp > currentTime then
             if originalCall then
                futureDates.WriteBatchPut {Key1 = {DateKey.Key = timestamp}; Key2 = currentKey} value
@@ -951,6 +951,7 @@ module Indexer =
       (wb: WriteBatch)
       (db: RocksDb)
       (rocksFutureDatesName: string)
+      (rocksPositionsName: string)
       (minKey: IKeyable<'Key>)
       (maxKey: IKeyable<'Key>)
       (mappingFunction: 'Value option -> TimeHelper<'Key, 'Value> -> 'NewValue option )
@@ -958,7 +959,7 @@ module Indexer =
       : IObservable<Upsert<IKeyable<'Key>, 'NewValue> seq * SourceNodePosition> =
 
       let futureDates = (new RocksIndex<CompoundKey<DateTime, 'Key>, 'Value * (string * int)>(db, wb, rocksFutureDatesName) :> IIndex<CompoundKey<DateTime, 'Key>, 'Value * (string * int)>) 
-      let positions = (new RocksIndex<int, Map<string * int, int64>>(db, wb, rocksFutureDatesName) :> IIndex<int, Map<string * int, int64>>) 
+      let positions = (new RocksIndex<int, Map<string * int, int64>>(db, wb, rocksPositionsName) :> IIndex<int, Map<string * int, int64>>) 
 
       let observable = Subject<Upsert<IKeyable<'Key>, 'NewValue> seq * SourceNodePosition>()
 
