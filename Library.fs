@@ -260,7 +260,7 @@ module Indexer =
 
    globalStopwatch.Start()
 
-   type RocksIndex<'Key, 'T>(db: RocksDb, wb: WriteBatch, columnFamilyName: string) = 
+   type RocksIndex<'Key, 'T>(db: RocksDb, wb: WriteBatchWithIndex, columnFamilyName: string) = 
       let cf = db.GetColumnFamily(columnFamilyName)
 
       member private this.get (key: IKeyable<'Key>): Option<'T> = 
@@ -488,7 +488,7 @@ module Indexer =
 
    // hostAndPort should look something like kafka:9093 or localhost:9092 or something like that
    let sourceNode 
-      (wb: WriteBatch)
+      (wb: WriteBatchWithIndex)
       (db: RocksDb) 
       (rocksDbName) 
       (topicName: string) 
@@ -720,7 +720,7 @@ module Indexer =
       observable
 
    let primaryIndexNode 
-      (wb: WriteBatch)
+      (wb: WriteBatchWithIndex)
       (db: RocksDb)
       (rocksDbName: string)
       (comparer: Option<IKeyable<'Key> -> IKeyable<'Key> -> int>)
@@ -812,7 +812,7 @@ module Indexer =
    | Righty of 'b
    
    let reduceNode
-      (wb: WriteBatch)
+      (wb: WriteBatchWithIndex)
       (db: RocksDb)
       (rocksDbName: string)
       extractForeignKey 
@@ -962,7 +962,7 @@ module Indexer =
       timer.Elapsed
 
    let timeNode
-      (wb: WriteBatch)
+      (wb: WriteBatchWithIndex)
       (db: RocksDb)
       (rocksFutureDatesName: string)
       (rocksPositionsName: string)
@@ -1054,7 +1054,7 @@ module Indexer =
 
 
    let eventProjectionNode 
-      (wb: WriteBatch)
+      (wb: WriteBatchWithIndex)
       (db: RocksDb)
       (rocksDbName: string)
       (mappingFunction: 'NewValue option -> Upsert<IKeyable<'Key>, 'Value> -> 'NewValue option)
@@ -1092,7 +1092,7 @@ module Indexer =
 
    
    let exportNode
-      (wb: WriteBatch)
+      (wb: WriteBatchWithIndex)
       (db: RocksDb)
       (kafkaBootstrapServers)
       (outputTopicName)
