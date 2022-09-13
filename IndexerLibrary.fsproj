@@ -21,7 +21,7 @@
     <PackageReference Include="FSPickler.Json" Version="5.3.2" />
     <PackageReference Include="RocksDBNative" Version="5.17.2" />
     <PackageReference Include="RocksDBSharp" Version="5.17.2" />
-    <PackageReference Include="FsGrpc" Version="0.9.5" />
+    <PackageReference Include="FsGrpc" Version="0.9.7" />
   </ItemGroup>
 
 
