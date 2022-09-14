@@ -1079,8 +1079,8 @@ module Indexer =
                   let storedValue = index.Get key
                   let projectedValue = i |> mappingFunction storedValue
                   match projectedValue with
-                  | Some(x) -> index.Put key (Some(x))
-                  | None -> index.Put key None |> ignore
+                  | Some(x) -> index.WriteBatchPut key (Some(x))
+                  | None -> index.WriteBatchPut key None |> ignore
                   {Key = i.Key; Value = projectedValue |> Option.map (fun k -> (i.Key, k))})
                |> Seq.toList
             observable.Next (emits, position)
