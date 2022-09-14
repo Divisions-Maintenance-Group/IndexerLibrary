@@ -1048,6 +1048,10 @@ module Indexer =
       )
 
       source |> Observable.add (fun (upserts, position) ->
+         async {
+            while processor.CurrentQueueLength > 1000 do
+               do! Async.Sleep(100)
+         } |> Async.RunSynchronously
          processor.Post (ProcessSourceItem(upserts, position))
       )
       observable
