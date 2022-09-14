@@ -261,114 +261,126 @@ module Indexer =
 
    globalStopwatch.Start()
 
-   type RocksIndex<'Key, 'T>(db: RocksDb, wb: WriteBatch, columnFamilyName: string) = 
+   type RocksIndex<'Key, 'T>(db: RocksDb, wb: WriteBatchWithIndex, columnFamilyName: string) = 
       let cf = db.GetColumnFamily(columnFamilyName)
 
       member private this.get (key: IKeyable<'Key>): Option<'T> = 
-         rocksStopwatch.Start()
-         getCounter <- getCounter + 1L
-         try 
-            let key = key.GetKeyBytes()
-            match db.Get(key, cf) with
-            | null -> None
-            | bytes ->
-               let (_, gotValue): IKeyable<'Key> * 'T = bs.UnPickle bytes
-               rocksStopwatch.Stop()
-               Some gotValue
-         with e ->
-            raise (Exception("You probably need to destroy your old rocksdb indexes (they are likely out of date)", e))
+         lock wb
+         <| fun () -> 
+            rocksStopwatch.Start()
+            getCounter <- getCounter + 1L
+            try 
+               let key = key.GetKeyBytes()
+               match db.Get(key, cf) with
+               | null -> None
+               | bytes ->
+                  let (_, gotValue): IKeyable<'Key> * 'T = bs.UnPickle bytes
+                  rocksStopwatch.Stop()
+                  Some gotValue
+            with e ->
+               raise (Exception("You probably need to destroy your old rocksdb indexes (they are likely out of date)", e))
       member private this.put (key: IKeyable<'Key>) (value: Option<'T>): unit = 
-         rocksStopwatch.Start()
-         writeCounter <- writeCounter + 1L
-         let pkey = key.GetKeyBytes()
-         let returnValue = 
-            match value with
-            | Some x -> db.Remove(pkey, cf)
-                        db.Put(pkey, bs.Pickle((key, x)), cf)
-            | None -> db.Remove(pkey, cf)
-         rocksStopwatch.Stop()
-         returnValue
+         lock wb
+         <| fun () -> 
+            rocksStopwatch.Start()
+            writeCounter <- writeCounter + 1L
+            let pkey = key.GetKeyBytes()
+            let returnValue = 
+               match value with
+               | Some x -> db.Remove(pkey, cf)
+                           db.Put(pkey, bs.Pickle((key, x)), cf)
+               | None -> db.Remove(pkey, cf)
+            rocksStopwatch.Stop()
+            returnValue
       member private this.writeBatchPut (key: IKeyable<'Key>) (value: Option<'T>): unit = 
-         rocksStopwatch.Start()
-         writeBatchCounter <- writeBatchCounter + 1L
-         let pkey = key.GetKeyBytes()
-         let returnValue = 
-            match value with
-            | Some x -> wb.Delete(pkey, cf) |> ignore
-                        wb.Put(pkey, bs.Pickle((key, x)), cf) |> ignore
-            | None -> wb.Delete(pkey, cf) |> ignore
-         rocksStopwatch.Stop()
-         returnValue
+         lock wb
+         <| fun () -> 
+            rocksStopwatch.Start()
+            writeBatchCounter <- writeBatchCounter + 1L
+            let pkey = key.GetKeyBytes()
+            let returnValue = 
+               match value with
+               | Some x -> wb.Delete(pkey, cf) |> ignore
+                           wb.Put(pkey, bs.Pickle((key, x)), cf) |> ignore
+               | None -> wb.Delete(pkey, cf) |> ignore
+            rocksStopwatch.Stop()
+            returnValue
       member private this.getall() = 
-         use iter = (db.NewIterator(cf))
-         iter.SeekToFirst() |> ignore
-         let sequence = iter |> Seq.unfold (fun iter -> 
-                                                if iter.Valid () then
-                                                   let (key: IKeyable<'Key>, value: 'T) = bs.UnPickle (iter.Value())
-                                                   Some ({Key = key; Value = Some value}, iter.Next())
-                                                else
-                                                   None
-                                             )
-                              |> Seq.toList
-         sequence
-      member private this.getallAsSequence() = 
-         let iter = (db.NewIterator(cf))
-         iter.SeekToFirst() |> ignore
-         let sequence = iter |> Seq.unfold (fun iter -> 
-                                                if iter.Valid () then
-                                                   let (key: IKeyable<'Key>, value: 'T) = bs.UnPickle (iter.Value())
-                                                   Some ({Key = key; Value = Some value}, iter.Next())
-                                                else
-                                                   None
-                                             )
-////                              |> Seq.toList
-         sequence, iter
-      member private this.range (startKey:IKeyable<'Key>) (endKey:IKeyable<'Key>) (comparer: Option<IKeyable<'Key> -> IKeyable<'Key> -> int>) (snapshot: Option<Snapshot>) : IEnumerable<Upsert<IKeyable<'Key>, 'T>> = 
-         rocksStopwatch.Start()
-         rangeCounter <- rangeCounter + 1L
-         let modefiedComparer (comparer: Option<IKeyable<'Key> -> IKeyable<'Key> -> int>) (x:IKeyable<'Key>) (y:IKeyable<'Key>) = 
-            match comparer with
-            | Some f ->
-               f x y
-            | None ->
-               x.Compare(y)
-         let modifiedComparer = modefiedComparer comparer
-
-         let startKeybytes = startKey.GetKeyBytes()
-         use iter = match snapshot with
-                    | Some s -> (db.NewIterator(cf, ReadOptions().SetSnapshot(s)))
-                    | None -> (db.NewIterator(cf))
-         iter.Seek(startKeybytes) |> ignore
-         let getKey () = 
-            let (key: IKeyable<'Key>, value: 'T) = bs.UnPickle (iter.Value())
-            key
-//         let rec iterateBackwardsToStart startKey (iter: Iterator): unit =
-//            if iter.Valid() then
-//               if (compary (getKey()) startKey) >= 0 then 
-//                  iter.Prev() |> ignore
-//                  iterateBackwardsToStart startKey iter
-//         iterateBackwardsToStart startKey iter
-//         if iter.Valid() then
-//            iter.Next() |> ignore
-//         else
-//            iter.SeekToFirst() |> ignore
-//            if iter.Valid() then
-//               if (compary (getKey()) startKey) <> 0 then 
-//                  iter.Seek(startKeybytes) |> ignore
-
-         let sequence = iter |> Seq.unfold (fun iter -> 
-                                                if iter.Valid () then
-                                                   let (key: IKeyable<'Key>, value: 'T) = bs.UnPickle (iter.Value())
-                                                   if modifiedComparer key endKey <= 0 then
+         lock wb
+         <| fun () -> 
+            use iter = (db.NewIterator(cf))
+            iter.SeekToFirst() |> ignore
+            let sequence = iter |> Seq.unfold (fun iter -> 
+                                                   if iter.Valid () then
+                                                      let (key: IKeyable<'Key>, value: 'T) = bs.UnPickle (iter.Value())
                                                       Some ({Key = key; Value = Some value}, iter.Next())
                                                    else
                                                       None
-                                                else
-                                                   None
-                                             )
-                           |> Seq.toList
-         rocksStopwatch.Stop()
-         sequence
+                                                )
+                                 |> Seq.toList
+            sequence
+      member private this.getallAsSequence() = 
+         lock wb
+         <| fun () -> 
+            let iter = (db.NewIterator(cf))
+            iter.SeekToFirst() |> ignore
+            let sequence = iter |> Seq.unfold (fun iter -> 
+                                                   if iter.Valid () then
+                                                      let (key: IKeyable<'Key>, value: 'T) = bs.UnPickle (iter.Value())
+                                                      Some ({Key = key; Value = Some value}, iter.Next())
+                                                   else
+                                                      None
+                                                )
+   ////                              |> Seq.toList
+            sequence, iter
+      member private this.range (startKey:IKeyable<'Key>) (endKey:IKeyable<'Key>) (comparer: Option<IKeyable<'Key> -> IKeyable<'Key> -> int>) (snapshot: Option<Snapshot>) : IEnumerable<Upsert<IKeyable<'Key>, 'T>> = 
+         lock wb
+         <| fun () -> 
+            rocksStopwatch.Start()
+            rangeCounter <- rangeCounter + 1L
+            let modefiedComparer (comparer: Option<IKeyable<'Key> -> IKeyable<'Key> -> int>) (x:IKeyable<'Key>) (y:IKeyable<'Key>) = 
+               match comparer with
+               | Some f ->
+                  f x y
+               | None ->
+                  x.Compare(y)
+            let modifiedComparer = modefiedComparer comparer
+
+            let startKeybytes = startKey.GetKeyBytes()
+            use iter = match snapshot with
+                     | Some s -> (db.NewIterator(cf, ReadOptions().SetSnapshot(s)))
+                     | None -> (db.NewIterator(cf))
+            iter.Seek(startKeybytes) |> ignore
+            let getKey () = 
+               let (key: IKeyable<'Key>, value: 'T) = bs.UnPickle (iter.Value())
+               key
+   //         let rec iterateBackwardsToStart startKey (iter: Iterator): unit =
+   //            if iter.Valid() then
+   //               if (compary (getKey()) startKey) >= 0 then 
+   //                  iter.Prev() |> ignore
+   //                  iterateBackwardsToStart startKey iter
+   //         iterateBackwardsToStart startKey iter
+   //         if iter.Valid() then
+   //            iter.Next() |> ignore
+   //         else
+   //            iter.SeekToFirst() |> ignore
+   //            if iter.Valid() then
+   //               if (compary (getKey()) startKey) <> 0 then 
+   //                  iter.Seek(startKeybytes) |> ignore
+
+            let sequence = iter |> Seq.unfold (fun iter -> 
+                                                   if iter.Valid () then
+                                                      let (key: IKeyable<'Key>, value: 'T) = bs.UnPickle (iter.Value())
+                                                      if modifiedComparer key endKey <= 0 then
+                                                         Some ({Key = key; Value = Some value}, iter.Next())
+                                                      else
+                                                         None
+                                                   else
+                                                      None
+                                                )
+                              |> Seq.toList
+            rocksStopwatch.Stop()
+            sequence
       interface IIndex<'Key, 'T> with
          member this.Get key = 
             this.get key
@@ -479,7 +491,7 @@ module Indexer =
    let inline sourceNode<'Value 
                            when 'Value: (static member Proto : Lazy<FsGrpc.Protobuf.ProtoDef<'Value>>)
                            and 'Value: equality>
-      (wb: WriteBatch)
+      (wb: WriteBatchWithIndex)
       (db: RocksDb) 
       (rocksDbName) 
       (topicName: string) 
@@ -533,9 +545,11 @@ module Indexer =
                         while transactionProcessor.CurrentQueueLength > 1000 do
                            do! Async.Sleep(100)
                         transactionProcessor.Post (Action (fun () -> 
-                           observable.Next ([{Key = {UUIDKey.Key = result.key}; Value = result.value}], (sourceNodeUniqueIdentifier, partitionNumber, position))
-                           db.Write(wb)
-                           wb.Clear() |> ignore
+                           lock wb
+                           <| fun () -> 
+                              observable.Next ([{Key = {UUIDKey.Key = result.key}; Value = result.value}], (sourceNodeUniqueIdentifier, partitionNumber, position))
+                              db.Write(wb)
+                              wb.Clear() |> ignore
                            match result.position with
                            | (_, _, Offset offset) -> index.Put {StringKey.Key = $"storedPosition-{partitionNumber}"} (Some offset)
                            | _ -> printfn "The offset has been set to an invalid value (probaly a sentinal)"
@@ -709,7 +723,7 @@ module Indexer =
       observable
 
    let primaryIndexNode 
-      (wb: WriteBatch)
+      (wb: WriteBatchWithIndex)
       (db: RocksDb)
       (rocksDbName: string)
       (comparer: Option<IKeyable<'Key> -> IKeyable<'Key> -> int>)
@@ -801,7 +815,7 @@ module Indexer =
    | Righty of 'b
    
    let reduceNode
-      (wb: WriteBatch)
+      (wb: WriteBatchWithIndex)
       (db: RocksDb)
       (rocksDbName: string)
       extractForeignKey 
@@ -923,8 +937,127 @@ module Indexer =
       )
       observable
 
+   type TimeHelper<'Key, 'Value> 
+      (
+         currentKey: IKeyable<'Key>, 
+         value: ('Value * (string * int)) option, 
+         futureDates: IIndex<CompoundKey<DateTime, 'Key>, 'Value * (string * int)>,
+         originalCall: bool
+      ) = 
+      let currentTime = DateTime.UtcNow
+
+      member this.isTimeInFuture (timestamp: DateTime) = 
+         if timestamp > currentTime then
+            if originalCall then
+               futureDates.WriteBatchPut {Key1 = {DateKey.Key = timestamp}; Key2 = currentKey} value
+            true
+         else
+            false
+
+   type TimeNodePossibleMessages<'Key, 'Value> =
+      | ProcessFutureDates
+      | ProcessSourceItem of (Upsert<IKeyable<'Key>, 'Value> seq * SourceNodePosition) 
+
+   let createTimer interval =
+      let timer = new Timers.Timer(interval)
+      timer.AutoReset <- true
+      timer.Enabled <- true
+      timer.Elapsed
+
+   let timeNode
+      (wb: WriteBatchWithIndex)
+      (db: RocksDb)
+      (rocksFutureDatesName: string)
+      (rocksPositionsName: string)
+      (minKey: IKeyable<'Key>)
+      (maxKey: IKeyable<'Key>)
+      (mappingFunction: 'Value option -> TimeHelper<'Key, 'Value> -> 'NewValue option )
+      (source: IObservable<Upsert<IKeyable<'Key>, 'Value> seq * SourceNodePosition>)
+      : IObservable<Upsert<IKeyable<'Key>, 'NewValue> seq * SourceNodePosition> =
+
+      let futureDates = (new RocksIndex<CompoundKey<DateTime, 'Key>, 'Value * (string * int)>(db, wb, rocksFutureDatesName) :> IIndex<CompoundKey<DateTime, 'Key>, 'Value * (string * int)>) 
+      let positions = (new RocksIndex<int, Map<string * int, int64>>(db, wb, rocksPositionsName) :> IIndex<int, Map<string * int, int64>>) 
+
+      let observable = Subject<Upsert<IKeyable<'Key>, 'NewValue> seq * SourceNodePosition>()
+
+      let processor = MailboxProcessor<TimeNodePossibleMessages<'Key, 'Value>>.Start(fun inbox ->
+         let rec innerLoop () = async {
+            let! message = inbox.Receive()
+            match message with
+            | ProcessSourceItem(upserts, position) ->
+               try
+                  let sourceNodeUniqueIdentifier, partition, offset = position
+                  let emits = 
+                     upserts 
+                     |> Seq.map (fun upsert -> 
+                        {
+                           Key = upsert.Key 
+                           Value = 
+                              mappingFunction 
+                                 upsert.Value 
+                                 (TimeHelper(upsert.Key, (match upsert.Value with Some(x) -> Some(x, (sourceNodeUniqueIdentifier, partition)) | None -> None), futureDates, true))
+                        })
+                     |> Seq.toList
+                  let positionMap = 
+                     positions.Get {IntKey.Key = 1} |> Option.defaultValue Map.empty
+                     |> Map.add (sourceNodeUniqueIdentifier, partition) offset
+                  positions.Put {IntKey.Key = 1} (Some positionMap)
+                  lock wb
+                  <| fun () -> 
+                     observable.Next (emits, position)
+                     db.Write(wb)
+                     wb.Clear() |> ignore
+               with e ->
+                  printfn "%A" e
+                  raise e
+            | ProcessFutureDates ->
+               try 
+                  let now = DateTime.UtcNow
+                  let itemsToReprocess = 
+                     futureDates.Range {Key1 = {DateKey.Key = DateTime.MinValue}; Key2 = minKey} {Key1 = {DateKey.Key = now}; Key2 = maxKey} None
+                  
+                  itemsToReprocess
+                  |> Seq.iter (fun upsert -> 
+                     match upsert.Value with
+                     | None -> ()
+                     | Some (value, (sourceNodeUniqueIdentifier, partition)) ->
+                        let emit = 
+                           {
+                              Key = upsert.Key.GetKey().Key2
+                              Value = 
+                                 mappingFunction 
+                                    (Some value) 
+                                    (TimeHelper(upsert.Key.GetKey().Key2, upsert.Value, futureDates, false))
+                           }
+                        let offset = ((positions.Get {IntKey.Key = 1}).Value.TryFind (sourceNodeUniqueIdentifier, partition)).Value
+
+                        lock wb
+                        <| fun () -> 
+                           observable.Next (seq {emit}, (sourceNodeUniqueIdentifier, partition, offset))
+                           db.Write(wb)
+                           wb.Clear() |> ignore
+                     futureDates.Put upsert.Key None)
+               with e ->
+                  printfn "%A" e
+                  raise e
+            return! innerLoop()
+         }
+         innerLoop ())
+
+      createTimer 100 
+      |> Event.add(fun event -> 
+         if processor.CurrentQueueLength < 1000 then
+            processor.Post ProcessFutureDates
+      )
+
+      source |> Observable.add (fun (upserts, position) ->
+         processor.Post (ProcessSourceItem(upserts, position))
+      )
+      observable
+
+
    let eventProjectionNode 
-      (wb: WriteBatch)
+      (wb: WriteBatchWithIndex)
       (db: RocksDb)
       (rocksDbName: string)
       (mappingFunction: 'NewValue option -> Upsert<IKeyable<'Key>, 'Value> -> 'NewValue option)
@@ -959,13 +1092,14 @@ module Indexer =
             raise e
       )
       observable
+
    
    let inline exportNode<'Envelope,'Value 
                            when 'Envelope: (static member Proto : Lazy<FsGrpc.Protobuf.ProtoDef<'Envelope>>) 
                            and 'Envelope: equality
                            and 'Value: (static member Proto : Lazy<FsGrpc.Protobuf.ProtoDef<'Value>>)
                            and 'Value: equality>
-      (wb: WriteBatch)
+      (wb: WriteBatchWithIndex)
       (db: RocksDb)
       (kafkaBootstrapServers)
       (outputTopicName)// som
@@ -986,6 +1120,8 @@ module Indexer =
             (
                fun uuid data offset -> 
                   if data |> Option.ofObj |> Option.defaultValue (Array.empty) |> Array.isEmpty then
+                     index.Put {UUIDKey.Key = uuid} (Some (None, None)) 
+                  elif data.Length = 0 then
                      index.Put {UUIDKey.Key = uuid} (Some (None, None)) 
                   else
                      let positions, value = decode data |> pullPositionAndValueFromEnvelope
