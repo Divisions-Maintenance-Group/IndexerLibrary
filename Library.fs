@@ -545,9 +545,9 @@ module Indexer =
                         while transactionProcessor.CurrentQueueLength > 1000 do
                            do! Async.Sleep(100)
                         transactionProcessor.Post (Action (fun () -> 
+                           observable.Next ([{Key = {UUIDKey.Key = result.key}; Value = result.value}], (sourceNodeUniqueIdentifier, partitionNumber, position))
                            lock wb
                            <| fun () -> 
-                              observable.Next ([{Key = {UUIDKey.Key = result.key}; Value = result.value}], (sourceNodeUniqueIdentifier, partitionNumber, position))
                               db.Write(wb)
                               wb.Clear() |> ignore
                            match result.position with
@@ -1002,9 +1002,9 @@ module Indexer =
                      positions.Get {IntKey.Key = 1} |> Option.defaultValue Map.empty
                      |> Map.add (sourceNodeUniqueIdentifier, partition) offset
                   positions.Put {IntKey.Key = 1} (Some positionMap)
+                  observable.Next (emits, position)
                   lock wb
                   <| fun () -> 
-                     observable.Next (emits, position)
                      db.Write(wb)
                      wb.Clear() |> ignore
                with e ->
