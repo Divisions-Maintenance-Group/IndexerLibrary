@@ -72,13 +72,10 @@ module Kafka =
             consumer.Close();
 
         member self.writeLineToStream(uuid: UUID, line: byte[]) = 
-            async {
-                let uuidstuff = uuid.GetBytes
-                let! result = producer.ProduceAsync (
-                    topic, 
-                    new Message<byte[], byte[]>(Key = uuidstuff, Value = line)) |> Async.AwaitTask
-                return result.Offset.Value
-            }
+            let uuidstuff = uuid.GetBytes
+            producer.Produce (
+                topic, 
+                new Message<byte[], byte[]>(Key = uuidstuff, Value = line)) 
 
 
 
@@ -348,8 +345,8 @@ module Indexer =
 
             let startKeybytes = startKey.GetKeyBytes()
             use iter = match snapshot with
-                     | Some s -> (db.NewIterator(cf, ReadOptions().SetSnapshot(s)))
-                     | None -> (db.NewIterator(cf))
+                       | Some s -> (db.NewIterator(cf, ReadOptions().SetSnapshot(s)))
+                       | None -> (db.NewIterator(cf))
             iter.Seek(startKeybytes) |> ignore
             let getKey () = 
                let (key: IKeyable<'Key>, value: 'T) = bs.UnPickle (iter.Value())
@@ -500,10 +497,8 @@ module Indexer =
       (transactionProcessor: MailboxProcessor<TransactionMessage>)
       (waitList: (unit -> bool) seq)
       : IObservable<seq<Upsert<IKeyable<UUID>, 'Value>> * SourceNodePosition> * (unit -> bool) = 
-         async {
-            while not (waitList |> Seq.forall (fun i -> i())) do
-               do! Async.Sleep(100)
-         } |> Async.RunSynchronously
+         while not (waitList |> Seq.forall (fun i -> i())) do
+            System.Threading.Thread.Sleep(100)
 
          let numPartitions = getNumberOfPartitions (topicName) (hostAndPort)
          let partitionNumbers = seq { 0 .. (numPartitions-1) }
@@ -1114,34 +1109,28 @@ module Indexer =
       (source: IObservable<Delta<IKeyable<UUID>, 'Value> seq * SourceNodePosition>)
       : unit = 
       let outputTopic = Kafka.Kafka($"{kafkaBootstrapServers}", outputTopicName)
-      let mutable okToProcess = false
 
       let index = (new RocksIndex<UUID, 'Value option * 'Value option>(db, wb, indexName) :> IIndex<UUID, 'Value option * 'Value option>) 
       let positionDict = (new RocksIndex<CompoundKey<string, int>, int64 * int64>(db, wb, positionDictName) :> IIndex<CompoundKey<string, int>, int64 * int64>) 
 
-      async {
-         outputTopic.readWholeStream
-            (
-               fun uuid data offset -> 
+      outputTopic.readWholeStream
+          (
+              fun uuid data offset -> 
                   if data |> Option.ofObj |> Option.defaultValue (Array.empty) |> Array.isEmpty then
-                     index.Put {UUIDKey.Key = uuid} (Some (None, None)) 
+                      index.Put {UUIDKey.Key = uuid} (Some (None, None)) 
                   elif data.Length = 0 then
-                     index.Put {UUIDKey.Key = uuid} (Some (None, None)) 
+                      index.Put {UUIDKey.Key = uuid} (Some (None, None)) 
                   else
-                     let positions, value = decode data |> pullPositionAndValueFromEnvelope
-                     positions |> Seq.iter (fun i -> 
-                        let (id, partition, position) = i
-                        positionDict.Put {Key1 = {StringKey.Key = id}; Key2 = {IntKey.Key = partition}} (Some(position, -1L)))
-                     index.Put {UUIDKey.Key = uuid} (Some (Some value, None))
-            )
-         okToProcess <- true
-      } |> Async.Start
+                      let positions, value = decode data |> pullPositionAndValueFromEnvelope
+                      positions |> Seq.iter (fun i -> 
+                      let (id, partition, position) = i
+                      positionDict.Put {Key1 = {StringKey.Key = id}; Key2 = {IntKey.Key = partition}} (Some(position, -1L)))
+                      index.Put {UUIDKey.Key = uuid} (Some (Some value, None))
+          )
 
       source 
       |> Observable.add (fun (deltas, position) ->
          try
-            while not okToProcess do
-               async {do! Async.Sleep(100)} |> Async.RunSynchronously
             deltas
             |> Seq.iter (fun delta -> 
                let storedValues = index.Get delta.Key
@@ -1173,17 +1162,14 @@ module Indexer =
                      | None -> None
                      | Some(v) -> Some(v)
                   if lvalue <> rvalue then
-                     async {
-                        let optionalBytes = 
-                           (createEnvelope 
-                              (allPositions 
-                                 |> Seq.map (fun i -> (i.Key.GetKey().Key1.GetKey(), i.Key.GetKey().Key2.GetKey(), snd i.Value.Value))
-                                 |> Seq.toList)
-                              rvalue) 
-                           |> Option.map encode
-                        let! outputTopicWrittenOffset = outputTopic.writeLineToStream(i.Key.GetKey(), optionalBytes |> Option.defaultValue null)
-                        ()
-                     } |> Async.StartImmediate
+                     let optionalBytes = 
+                        (createEnvelope 
+                            (allPositions 
+                                |> Seq.map (fun i -> (i.Key.GetKey().Key1.GetKey(), i.Key.GetKey().Key2.GetKey(), snd i.Value.Value))
+                                |> Seq.toList)
+                            rvalue) 
+                        |> Option.map encode
+                     outputTopic.writeLineToStream(i.Key.GetKey(), optionalBytes |> Option.defaultValue null)
                      index.Put i.Key None
                   else
                      index.Put i.Key None
