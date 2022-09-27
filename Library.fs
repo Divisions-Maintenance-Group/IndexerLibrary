@@ -500,10 +500,9 @@ module Indexer =
       (transactionProcessor: MailboxProcessor<TransactionMessage>)
       (waitList: (unit -> bool) seq)
       : IObservable<seq<Upsert<IKeyable<UUID>, 'Value>> * SourceNodePosition> * (unit -> bool) = 
-         async {
-            while not (waitList |> Seq.forall (fun i -> i())) do
-               do! Async.Sleep(100)
-         } |> Async.RunSynchronously
+
+         while not (waitList |> Seq.forall (fun i -> i())) do
+            System.Threading.Thread.Sleep(100)
 
          let numPartitions = getNumberOfPartitions (topicName) (hostAndPort)
          let partitionNumbers = seq { 0 .. (numPartitions-1) }
