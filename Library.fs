@@ -501,8 +501,6 @@ module Indexer =
       (waitList: (unit -> bool) seq)
       : IObservable<seq<Upsert<IKeyable<UUID>, 'Value>> * SourceNodePosition> * (unit -> bool) = 
 
-         while not (waitList |> Seq.forall (fun i -> i())) do
-            System.Threading.Thread.Sleep(100)
 
          let numPartitions = getNumberOfPartitions (topicName) (hostAndPort)
          let partitionNumbers = seq { 0 .. (numPartitions-1) }
@@ -518,8 +516,11 @@ module Indexer =
 
          partitionNumbers |> Seq.iter (fun partitionNumber -> 
             async {
-               let configedPosition = index.Get {StringKey.Key = $"storedPosition-{partitionNumber}"}
                try
+                  while not (waitList |> Seq.forall (fun i -> i())) do
+                     do! Async.Sleep(100)
+
+                  let configedPosition = index.Get {StringKey.Key = $"storedPosition-{partitionNumber}"}
                   let kafkaServerConnection = new KafkaServerConnection(hostAndPort)
                   let stateTopic = TopicDefinition.CreateOptional<'Value> (topicName, StateTopic) 
                   let topicNamePartitionOffset = Option.map (fun i -> (topicName, Partition partitionNumber, Offset (i + 1L))) configedPosition
