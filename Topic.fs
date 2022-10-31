@@ -60,7 +60,7 @@ module Serialize =
 
     let inline optionalMessageD<'T when 'T: (static member Proto : Lazy<FsGrpc.Protobuf.ProtoDef<'T>>) and 'T: equality> = 
         new Deserializer<'T option>(fun d isNull ->
-            if isNull then None
+            if isNull || d.Length = 0 then None
             else Some (FsGrpc.Protobuf.decode d))
 
     let inline optionalMessage<'T when 'T: (static member Proto : Lazy<FsGrpc.Protobuf.ProtoDef<'T>>) and 'T: equality> = 
